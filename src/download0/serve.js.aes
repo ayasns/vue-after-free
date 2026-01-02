@@ -50,13 +50,16 @@ try {
 
     // handle WebSocket received messages
     ws.onmessage = function(c, e) {
-        try {
-            var script = String(e.data);
-            jsmaf.eval(script);
-        } catch(err) {
-            log(err);
+        if (e.data.length === 1 && e.data[0].constructor.name === "String") {
+            try {
+                jsmaf.eval(e.data[0]);
+            } catch(err) {
+                log(`${err.message}: ${err.stack}`);
+            }
+        } else {
+            log("Failed to receive valid message !!")
         }
     };
 } catch(e) {
-    alert(e);
+    alert(`${e.message}: ${e.stack}`);
 }
