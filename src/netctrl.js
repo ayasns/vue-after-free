@@ -3,7 +3,7 @@
 // NetControl Kernel Exploit (NetControl port based on TheFl0w's Java impl)
 // ============================================================================
 
-include('inject.js')
+include('userland.js')
 
 utils.notify('ð\x9F\x92\xA9 NetControl ð\x9F\x92\xA9')
 
