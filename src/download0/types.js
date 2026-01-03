@@ -495,7 +495,7 @@ var utils = {
 var fn = {
   register: function (input, name, ret) {
     if (name in this) {
-      throw new Error(`${name} already registered in fn !!`)
+      return fn[name]
     }
 
     var id
@@ -570,7 +570,7 @@ var fn = {
             var errno = mem.view(errno_addr).getUint32(0, true)
             var str = fn.strerror(errno)
 
-            throw new Error(`${name} returned errno ${errno}: ${str}`)
+            log(`${name} returned errno ${errno}: ${str}`);
           }
         }
 
@@ -594,6 +594,8 @@ var fn = {
     Object.defineProperty(f, 'addr', { value: addr })
 
     fn[name] = f
+
+    return f
   },
   unregister (name) {
     if (!(name in this)) {
