@@ -2382,7 +2382,7 @@ function apply_kernel_patches(fw_version) {
             // Special check for sysent[11] sy_call - should point to jmp [rsi] gadget
             const sysent11_call = kernel.read_qword(kernel.addr.base.add(0x1102d88));
             const expected_gadget = kernel.addr.base.add(0x47b31);
-            if (sysent11_call === expected_gadget) {
+            if (sysent11_call.eq(expected_gadget)) {
                 debug("  [OK] sysent11_call -> jmp_rsi @ " + hex(sysent11_call));
             } else {
                 debug("  [FAIL] sysent11_call: expected " + hex(expected_gadget) + ", got " + hex(sysent11_call));
@@ -2394,7 +2394,6 @@ function apply_kernel_patches(fw_version) {
             } else {
                 debug("[WARNING] " + patch_errors + " kernel patches failed!");
             }
-            logger.flush();
         }
 
         // Restore original sysent[661]
