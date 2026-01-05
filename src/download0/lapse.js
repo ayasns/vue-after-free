@@ -35,11 +35,21 @@ const kpatch_shellcode = {
 // These are the offsets where 0x33 is patched to 0x37
 const kpatch_mmap_offsets = {
     // TODO: missing 5.00 to 8.50
-    "9.00": [0x156326a, 0x156326d],  // TODO: verify
-    "9.03": [0x156262a, 0x156262d],  // TODO: verify
-    "9.50": [0x122d7a, 0x122d7d],    // TODO: verify
-    "10.00": [0xed59a, 0xed59d],     // TODO: verify
-    "10.50": [0x19c42a, 0x19c42d],   // TODO: verify
+    "5.55": [0x3c2899, 0x3c289c],   // TODO: verify
+    "5.56": [0x24026d, 0x240270],   // TODO: verify
+    "6.00": [0x24026d, 0x240270],   // TODO: verify
+    "6.20": [0x24026d, 0x240270],   // TODO: verify
+    "6.50": [0xab57a, 0xab57d],     // TODO: verify
+    "6.70": [0xab57a, 0xab57d],     // TODO: verify
+    "7.00": [0x1d2336, 0x1d2339],   // TODO: verify
+    "7.50": [0xdb17d, 0xdb180],     // TODO: verify
+    "8.00": [0xfd03a, 0xfd03d],     // TODO: verify
+    "8.50": [0x826ea, 0x826ed],     // TODO: verify
+    "9.00": [0x16632a, 0x16632d],   // TODO: verify
+    "9.03": [0x1662da, 0x1662dd],   // TODO: verify
+    "9.50": [0x122d7a, 0x122d7d],   // TODO: verify
+    "10.00": [0xed59a, 0xed59d],    // TODO: verify
+    "10.50": [0x19c42a, 0x19c42d],  // TODO: verify
     "11.00": [0x15626a, 0x15626d],
     "11.02": [0x15628a, 0x15628d],
     "11.50": [0x1fa63a, 0x1fa63d],
