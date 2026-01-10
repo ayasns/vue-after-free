@@ -238,6 +238,9 @@ try {
         
     }
     
+    if(CONFIG.autouserland){  include('userland.js')  }
+    if(CONFIG.autolapse){  include('loader.js')  }
+    if(CONFIG.autopoop){  include('poop.js')  }
     
     
     
