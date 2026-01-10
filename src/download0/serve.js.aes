@@ -2,6 +2,42 @@
 
 var WS_PORT = 40404;
 
+var fs = {
+    write: function(filename, content, callback) {
+        var xhr = new jsmaf.XMLHttpRequest();
+        xhr.onreadystatechange = function() {
+            if (xhr.readyState === 4 && callback) {
+                callback(xhr.status === 0 || xhr.status === 200 ? null : new Error("failed"));
+            }
+        };
+        xhr.open("POST", "file://../download0/" + filename, true);
+        xhr.send(content);
+    },
+    
+    read: function(filename, callback) {
+        var xhr = new jsmaf.XMLHttpRequest();
+        xhr.onreadystatechange = function() {
+            if (xhr.readyState === 4 && callback) {
+                callback(xhr.status === 0 || xhr.status === 200 ? null : new Error("failed"), xhr.responseText);
+            }
+        };
+        xhr.open("GET", "file://../download0/" + filename, true);
+        xhr.send();
+    },
+    
+    delete: function(filename, callback) {
+        var xhr = new jsmaf.XMLHttpRequest();
+        xhr.onreadystatechange = function() {
+            if (xhr.readyState === 4 && callback) {
+                callback(xhr.status === 0 || xhr.status === 200 ? null : new Error("failed"));
+            }
+        };
+        xhr.open("DELETE", "file://../download0/" + filename, true);
+        xhr.send();
+    }
+};
+
+
 try {
     //allow remoteplay
     jsmaf.remotePlay = true 
@@ -11,26 +47,57 @@ try {
     ws = new jsmaf.WebSocketServer();
     ws.port = WS_PORT;
 
-    // move logo to top of screen
-    for (var i = 0; i < jsmaf.root.children.length; i++) {
-        var child = jsmaf.root.children[i];
-        if (child.url && child.url.indexOf("logo") !== -1) {
-            var scale = 2;
-            child.url = "file:///../download0/img/logo.png"
-            child.y = 220;  // 20px from top
-            child.x = 560;
-            child.width = 400 * scale;
-            child.height = 250 * scale;
-            
-            break;
+        
+    jsmaf.root.children.length = 0;
+    
+    
+    var bg_home = new Image({
+        url: "file:///../download0/img/multiview_bg_VAF.png",
+        x: 0,
+        y: 0,
+        width: 1920,
+        height: 1080
+    });
+    jsmaf.root.children.push(bg_home);
+    
+    var logo = new Image({
+        url: "file:///../download0/img/logo.png",
+        x: jsmaf.screenWidth/3.5,
+        y: 220,
+        width: 800,
+        height: 500
+    });
+    jsmaf.root.children.push(logo);
+    
+
+    // Button 1 - "Jailbreak"
+    var button1 = new Image({
+        url: "file:///../download0/img/btn_jb.png",
+        x: 800,
+        y: 780,
+        width: 300,
+        height: 80
+    });
+   
+    jsmaf.root.children.push(button1);
+    
+    jsmaf.onKeyDown = function(keyCode) {
+        //cross pressed
+        if (keyCode === 14) {
+            if(!jsmaf.circleIsAdvanceButton) {
+                include('loader.js')
+            }
+        }
+        //circle pressed
+        else if (keyCode === 13) {
+            if(jsmaf.circleIsAdvanceButton) {
+                include('loader.js')
+            }
         }
     }
-        // Clear screen
 
-
-    // Background
     var bg_success = new Image({
-        url: "file:///../download0/img/bg-success.jpg",
+        url: "file:///../download0/img/bg-success.png",
         x: 0,
         y: 0,
         width: 1920,
@@ -45,6 +112,31 @@ try {
         width: 1920,
         height: 1080
     });
+    
+            // Background
+    var cross = new Image({
+        url: "file:///assets/img/icon_cross.png",
+        x: 895,
+        y: 1010,
+        width: 40,
+        height: 40
+    });
+    
+    var circle = new Image({
+        url: "file:///assets/img/icon_cross.png",
+        x: 895,
+        y: 1010,
+        width: 40,
+        height: 40
+    });
+    
+    if(jsmaf.circleIsAdvanceButton) {
+         jsmaf.root.children.push(circle);
+    
+    }
+    else {
+         jsmaf.root.children.push(cross);
+    }
    
    
 
@@ -107,11 +199,47 @@ try {
         _log(`[-] ${msg}`, true)
     }
     
-    log("=== VUE AFTER FREE ===");
+    //log("=== VUE AFTER FREE ===");
     
     
     //startup scripts
-    //include('loader.js')
+    
+    //include('loader.js')           //autoload lapse on start
+    //include('payloads/web-ui.js')  //autoload web-ui on start
+    
+    
+    
+
+
+    
+    
+    try {
+        include('config.js')
+    }
+    catch(e){
+            var config = [
+            'var CONFIG = {',
+            '    autouserland: false, ',
+            '    autolapse: false, ',
+            '    autopoop: false',
+            '};',
+            '',
+            'var payloads = [ //to be ran after jailbroken',
+            '    "/mnt/sandbox/download/CUSA00960/payloads/aiofix_network.elf" ',
+            '    // add more payloads here',
+            '];'
+        ].join('\n');
+        log(e.message)
+        log('config.js not found! creating config')
+        fs.write("config.js", config, function(err) {
+            if (!err) console.log("config.js written");
+            include('config.js');
+        });
+        
+    }
+    
+    
+    
     
     
     // handle WebSocket received messages

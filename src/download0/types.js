@@ -491,6 +491,16 @@ var utils = {
 }
 
 var fn = {
+  // Cache for common small integer BigInts to avoid repeated allocations
+  _bigIntCache: (function() {
+    var cache = []
+    // Pre-allocate BigInts for 0-255 (common syscall args like flags, small sizes, fds)
+    for (var i = 0; i <= 255; i++) {
+      cache[i] = new BigInt(i)
+    }
+    return cache
+  })(),
+
   register: function (input, name, ret) {
     if (name in this) {
       return this[name];
@@ -548,8 +558,15 @@ var fn = {
 
       switch (typeof value) {
         case 'boolean':
+          value = value ? fn._bigIntCache[1] : fn._bigIntCache[0]
+          break
         case 'number':
-          value = new BigInt(value)
+          // Use cached BigInt for common small integers (0-255)
+          if (value >= 0 && value <= 255 && Number.isInteger(value)) {
+            value = fn._bigIntCache[value]
+          } else {
+            value = new BigInt(value)
+          }
           break
         case 'string':
           value = utils.cstr(value)
@@ -1009,4 +1026,31 @@ var syscalls = {
   clear: function () {
     syscalls.map.clear()
   }
+}
+
+// ROP chain helper - auto-converts integers to BigInts on push
+// This optimization reduces memory allocations in ROP chain building:
+// - Instead of: rop_chain.push(new BigInt(0, 1))
+// - Use:        rop_chain.push(1)
+// The push method automatically converts integers to BigInt(0, val)
+function createROPChain() {
+  var chain = []
+
+  // Override push to auto-convert integers to BigInts
+  chain.push = function() {
+    for (var i = 0; i < arguments.length; i++) {
+      var val = arguments[i]
+
+      // If it's a number, convert to BigInt(0, val)
+      // This treats the number as a 32-bit low value with high=0
+      if (typeof val === 'number') {
+        val = new BigInt(0, val)
+      }
+      // Otherwise assume it's already a BigInt or address and push as-is
+      Array.prototype.push.call(this, val)
+    }
+    return this.length
+  }
+
+  return chain
 }

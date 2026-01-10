@@ -677,6 +677,17 @@ function bl_network_loader() {
 // Main entry point with USB loader logic
 function bin_loader_main() {
     log("=== PS4 Payload Loader ===");
+    
+    for (var i = 0; i < payloads.length; i++) {
+        var payload = payloads[i];
+        log("Loading payload: " + payload);
+        if (bl_file_exists(payload)){
+            bl_load_from_file(payload);
+        }else {
+                log(payload + " not found!")
+            
+        }
+    }   
 
     // Priority 1: Check for USB payload on usb0-usb4 (like BD-JB does)
     for (var i = 0; i < USB_PAYLOAD_PATHS.length; i++) {
