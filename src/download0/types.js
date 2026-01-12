@@ -377,15 +377,24 @@ DataView.prototype.getBigInt = function (byteOffset, littleEndian) {
 }
 
 DataView.prototype.setBigInt = function (byteOffset, value, littleEndian) {
-  value = (value instanceof BigInt) ? value : new BigInt(value)
   littleEndian = (typeof littleEndian === 'undefined') ? false : littleEndian
 
-  this.setUint32(byteOffset, value.lo, littleEndian)
-  this.setUint32(byteOffset + 4, value.hi, littleEndian)
+  if (value instanceof BigInt) {
+    this.setUint32(byteOffset, value.lo, littleEndian)
+    this.setUint32(byteOffset + 4, value.hi, littleEndian)
+  }
+  else {
+    lo = value >>> 0
+    hi = Math.floor(value / 0x100000000) >>> 0
+    this.setUint32(byteOffset, lo, littleEndian)
+    this.setUint32(byteOffset + 4, hi, littleEndian)
+  }  
 }
 
 var mem = {
   view: function (addr) {
+    //addr = (addr instanceof BigInt) ? addr : new BigInt(addr)
+    
     master[4] = addr.lo
     master[5] = addr.hi
     return slave
@@ -492,9 +501,9 @@ var utils = {
 
 var fn = {
   register: function (input, name, ret) {
-    if (name in this) {
-      return this[name];
-    }
+    //if (name in this) {
+    //  return this[name];
+    //}
 
     var id
     var addr
@@ -548,8 +557,10 @@ var fn = {
 
       switch (typeof value) {
         case 'boolean':
+          value = value ? 1 : 0
+          break
         case 'number':
-          value = new BigInt(value)
+          value = value; //new BigInt(value)
           break
         case 'string':
           value = utils.cstr(value)
@@ -579,15 +590,15 @@ var fn = {
     if (this.ret) {
       result = mem.view(store_addr).getBigInt(8, true)
 
-      if (this.id) {
-        if (result.eq(-1)) {
-          var errno_addr = this._error()
-          var errno = mem.view(errno_addr).getUint32(0, true)
-          var str = this.strerror(errno)
+      //if (this.id) {
+        //if (result.eq(-1)) {
+        //  var errno_addr = this._error()
+        //  var errno = mem.view(errno_addr).getUint32(0, true)
+        //  var str = this.strerror(errno)
 
-          throw new Error(`${name} returned errno ${errno}: ${str}`)
-        }
-      }
+        //  throw new Error(`${name} returned errno ${errno}: ${str}`)
+        //}
+      //}
 
       switch(this.ret) {
           case 'bigint':
