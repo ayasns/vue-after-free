@@ -26,7 +26,7 @@ FONTS = {
 TRANSLATIONS = {
     'ar': {
         'jailbreak': 'Jailbreak',
-        'payloadMenu': 'قائمة الحمولات',
+        'payloadMenu': 'قائمة الحمولة',
         'config': 'الاعدادات',
         'exit': 'خروج',
         'back': 'رجوع',

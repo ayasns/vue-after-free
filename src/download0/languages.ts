@@ -66,7 +66,7 @@ switch (detectedLocale) {
     // ~ case 'ar':
     // ~ // Arabic
     // ~ lang.jailbreak = 'Jailbreak'
-    // ~ lang.payloadMenu = 'قائمة الحمولات'
+    // ~ lang.payloadMenu = 'قائمة الحمولة'
     // ~ lang.config = 'الاعدادات'
     // ~ lang.exit = 'خروج'
     // ~ lang.back = 'رجوع'
@@ -304,7 +304,7 @@ switch (detectedLocale) {
   case 'ar':
     // Arabic
     lang.jailbreak = 'Jailbreak'
-    lang.payloadMenu = 'قائمة الحمولات'
+    lang.payloadMenu = 'قائمة الحمولة'
     lang.config = 'الاعدادات'
     lang.exit = 'خروج'
     lang.back = 'رجوع'
