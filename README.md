@@ -31,11 +31,11 @@ This table indicates firmware versions for which the _current version_ of this r
 * Userland exploit works 5.05 to 13.02 as is.
 
 # FAQ 
-Q: I ran Vue and the crashed? A: If the app crashes the exploit failed reboot the console and try again.     
-Q: Will this work on 13.02 or above? A: Only the userland, you cannot jailbreak above 13.00 with the files in this repo.   
-Q: I ran Vue and my console shutdown what do I do? A: If a kernel panic occurred you may need to press the power button on your console twice, then retry running the exploit.  
-Q: How can I run a payload? A: Closing and Reopening Vue is required between running js payloads, but .bin or .eld payloads can be run one after the other. Select the payload from the UI in the Payload Menu.   
-Q: Can I run the jailbreak offline? A: No. PS Vue requires any form of network connection, internet is not required as such you can use any network like home WiFi or Hotspot from your mobile phone or a network from a micro controller like ESP32 or an Ethernet network from a reporpused PPPwn device.
+Q: Will this work on 13.02 or above? A: Only the userland, you cannot jailbreak above 13.00 with the files in this repo.         
+Q: I ran Vue and the app crashed? A: If the app crashes the exploit failed reboot the console and try again.          
+Q: I ran Vue and my console shutdown what do I do? A: If a kernel panic occurred you may need to press the power button on your console twice, then retry running the exploit.     
+Q: How can I run a payload? A: Closing and Reopening Vue is required between running js payloads, but .bin or .eld payloads can be run one after the other. Select the payload from the UI in the Payload Menu.        
+Q: Can I run the jailbreak offline? A: No. PS Vue requires any form of network connection, internet is not required as such you can use any network like home WiFi or Hotspot from your mobile phone or a network from a micro controller like ESP32 or an Ethernet network from a reporpused PPPwn device.  
 
 > [!IMPORTANT]
 > The Vue save file may occasionally reset. To avoid issues please copy the encrypted save to a USB, from the PS4 settings menu for the user that is used to run the jailbreak, for easy future recovery.   
