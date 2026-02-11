@@ -302,7 +302,7 @@ import { fn, BigInt } from 'download0/types'
       const selectedOption = menuOptions[currentButton]
       if (!selectedOption) return
       if (selectedOption.script === 'loader.js') {
-        jsmaf.onKeyDown = function () {}; 
+        jsmaf.onKeyDown = function () {}
       }
       log('Loading ' + selectedOption.script + '...')
       try {
