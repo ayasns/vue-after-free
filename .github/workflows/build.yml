@@ -55,6 +55,8 @@ jobs:
 
       - name: Build lite variant
         run: |
+          mkdir -p dist-lite/download0
+
           # Core runtime JS
           for f in serve.js.aes dummy_psn.json.aes loader.js userland.js types.js kernel.js \
                    lapse.js netctrl_c0w_twins.js binloader.js check-jailbroken.js defs.js; do
