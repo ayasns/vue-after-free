@@ -56,8 +56,6 @@ jobs:
       - name: Build lite variant
         run: |
           mkdir -p dist-lite/download0/payloads
-          mkdir -p dist-lite/download0/img/susec
-          mkdir -p dist-lite/download0/img/feil
 
           # Core runtime JS
           for f in serve.js.aes dummy_psn.json.aes loader.js userland.js types.js kernel.js \
@@ -69,13 +67,10 @@ jobs:
           cp dist/download0/payloads/*.elf dist-lite/download0/payloads/ 2>/dev/null || true
           cp dist/download0/payloads/*.bin dist-lite/download0/payloads/ 2>/dev/null || true
 
-          # Minimal images (success/fail screens, logo, background)
-          cp -r dist/download0/img/susec/* dist-lite/download0/img/susec/
-          cp -r dist/download0/img/feil/* dist-lite/download0/img/feil/
+          # Minimal images (logo, background)
+          mkdir -p dist-lite/download0/img
           cp dist/download0/img/logo.png dist-lite/download0/img/
           cp dist/download0/img/multiview_bg_VAF.png dist-lite/download0/img/
-          cp dist/download0/img/bg-success.png dist-lite/download0/img/ 2>/dev/null || true
-          cp dist/download0/img/bg-fail.jpg dist-lite/download0/img/ 2>/dev/null || true
 
           # Hardcoded lite config - auto detect, auto close, no music, no menus
           printf 'var CONFIG = {\n    autolapse: true,\n    autopoop: false,\n    autoclose: true,\n    autoclose_delay: 0,\n    music: false,\n    jb_behavior: 0\n};\nvar payloads = [];\n' > dist-lite/download0/config.js
