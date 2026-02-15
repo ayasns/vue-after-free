@@ -53,8 +53,56 @@ jobs:
           mkdir -p dist/savedata
           cp src/savedata/localstorage.aes dist/savedata/
 
+      - name: Build lite variant
+        run: |
+          mkdir -p dist-lite/download0/payloads
+          mkdir -p dist-lite/download0/img/susec
+          mkdir -p dist-lite/download0/img/feil
+
+          # Core runtime JS
+          for f in serve.js.aes dummy_psn.json.aes loader.js userland.js types.js kernel.js \
+                   lapse.js netctrl_c0w_twins.js binloader.js check-jailbroken.js defs.js; do
+            cp dist/download0/$f dist-lite/download0/
+          done
+
+          # Payloads
+          cp dist/download0/payloads/*.elf dist-lite/download0/payloads/ 2>/dev/null || true
+          cp dist/download0/payloads/*.bin dist-lite/download0/payloads/ 2>/dev/null || true
+
+          # Minimal images (success/fail screens, logo, background)
+          cp -r dist/download0/img/susec/* dist-lite/download0/img/susec/
+          cp -r dist/download0/img/feil/* dist-lite/download0/img/feil/
+          cp dist/download0/img/logo.png dist-lite/download0/img/
+          cp dist/download0/img/multiview_bg_VAF.png dist-lite/download0/img/
+          cp dist/download0/img/bg-success.png dist-lite/download0/img/ 2>/dev/null || true
+          cp dist/download0/img/bg-fail.jpg dist-lite/download0/img/ 2>/dev/null || true
+
+          # Hardcoded lite config - auto detect, auto close, no music, no menus
+          cat > dist-lite/download0/config.js <<'LITECONF'
+var CONFIG = {
+    autolapse: true,
+    autopoop: false,
+    autoclose: true,
+    autoclose_delay: 0,
+    music: false,
+    jb_behavior: 0
+};
+var payloads = [];
+LITECONF
+
+          # Generate lite manifest
+          cd dist-lite/download0
+          find . -type f | sed 's|^\./||' | sort > manifest.txt
+          cd ../..
+
+          # Copy savedata
+          cp -r dist/savedata dist-lite/savedata 2>/dev/null || true
+
       - name: Zip dist
         run: cd dist && zip -r ../vue-after-free-${{ github.ref_name }}.zip download0/ savedata/ && cd ..
+
+      - name: Zip lite dist
+        run: cd dist-lite && zip -r ../vue-after-free-lite-${{ github.ref_name }}.zip download0/ savedata/ && cd ..
 
       - name: Upload dist artifact
         uses: actions/upload-artifact@v4
@@ -68,11 +116,19 @@ jobs:
           name: vue-after-free-${{ github.ref_name }}
           path: vue-after-free-${{ github.ref_name }}.zip
 
-      - name: Upload release asset
+      - name: Upload lite build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: vue-after-free-lite-${{ github.ref_name }}
+          path: vue-after-free-lite-${{ github.ref_name }}.zip
+
+      - name: Upload release assets
         if: github.event_name == 'release'
         uses: softprops/action-gh-release@v2
         with:
-          files: vue-after-free-${{ github.ref_name }}.zip
+          files: |
+            vue-after-free-${{ github.ref_name }}.zip
+            vue-after-free-lite-${{ github.ref_name }}.zip
 
   deploy-pages:
     needs: build
